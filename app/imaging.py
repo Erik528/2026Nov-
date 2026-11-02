@@ -131,6 +131,7 @@ def validate_layout(layout,expected_ids=None):
     if not all(isinstance(x,dict) and isinstance(x.get('id'),str) for x in layout['layers']) or {x.get('id') for x in layout['layers']} != set(expected_ids):
         raise ValueError('图层名称无效。')
     for layer in layout['layers']:
+        if 'whiteout' in layer and not isinstance(layer['whiteout'],bool):raise ValueError('反白参数必须是布尔值。')
         for k in ['x','y','scale']:
             if not isinstance(layer.get(k),(int,float)) or not math.isfinite(layer[k]):
                 raise ValueError('图层参数必须为有限数值。')
@@ -174,6 +175,8 @@ def render(directory, layout):
             nw=max(1,round(img.width*transform['scale'])); nh=max(1,round(img.height*transform['scale']))
             if nw*nh>32_000_000: raise ValueError('图层缩放后过大。')
             img=img.resize((nw,nh),Image.Resampling.LANCZOS)
+        if transform.get('whiteout'):
+            alpha=img.getchannel('A');img=Image.new('RGBA',img.size,'white');img.putalpha(alpha)
         x,y=round(transform['x']),round(transform['y'])
         rect=[x,y,x+nw,y+nh]
         outside=rect[0]<safe[0] or rect[1]<safe[1] or rect[2]>safe[2] or rect[3]>safe[3]

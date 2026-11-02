@@ -29,7 +29,8 @@ with httpx.Client(base_url=args.server,timeout=300) as client:
         if not args.jpg:parser.error('Provide a real JPG advertisement, or --job ID')
         with args.jpg.open('rb') as stream:
             job=checked(client.post('/api/jobs',files={'file':(args.jpg.name,stream,'image/jpeg')}))
-        job=checked(client.post(f'/api/jobs/{job["id"]}/process'))
+        if job['status']!='processing' and not job.get('prepared'):
+            job=checked(client.post(f'/api/jobs/{job["id"]}/process'))
     print('JOB:',job['id'])
     deadline=time.monotonic()+1200
     while job['status']=='processing':

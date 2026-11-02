@@ -12,12 +12,13 @@ load_dotenv()
 from fastapi import FastAPI, UploadFile, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from PIL import Image
+from PIL import Image,ImageDraw
 import numpy as np
 
 from .imaging import SIZES, read_upload, work_image, region_masks, extract, default_layout, render, write_psd
 from .provider import OpenAIImages, ProviderError, settings
 from .psd_import import PSD_MAX_BYTES,RESIZE_POLICY,import_psd,catalog,set_roles,normalize_ai_layout
+from .psd_workflow import prepare as prepare_psd,background_meta
 
 ROOT=Path(__file__).resolve().parent
 DATA=Path(os.getenv('AD_DATA_DIR',str(ROOT.parent/'data'))).resolve()
@@ -53,9 +54,10 @@ def ready_state(path):
     if result.get('source_type')=='psd':
         with LOCK:
             data=catalog(path)
-            if not result.get('confirmed') or result.get('psd_layers')!=data['layers'] or result.get('resize_policy')!=RESIZE_POLICY:
+            prepared=bool(background_meta(path,data) and data.get('analysis_verified'))
+            if result.get('prepared')!=prepared or result.get('psd_layers')!=data['layers'] or result.get('resize_policy')!=RESIZE_POLICY:
                 quality={**result.get('quality',{}),'warnings':data.get('warnings',[])}
-                result=update(path,confirmed=True,psd_layers=data['layers'],quality=quality,resize_policy=RESIZE_POLICY,stage='PSD 已读取，可直接选择画幅 resize 并下载')
+                result=update(path,confirmed=prepared,prepared=prepared,psd_layers=data['layers'],quality=quality,resize_policy=RESIZE_POLICY)
     return result
 
 
@@ -100,6 +102,24 @@ def run(job):
         with LOCK: ACTIVE.discard(job)
 
 
+def run_psd(job):
+    path=folder(job)
+    try:
+        api=OpenAIImages()
+        data,meta=prepare_psd(path,api,lambda stage,progress:update(path,stage=stage,progress=progress))
+        update(path,status='review',stage='图层识别与四周扩图完成，可选择尺寸预览',progress=100,
+               confirmed=True,prepared=True,psd_layers=data['layers'],background_meta=meta,
+               error=None,failed_stage=None,error_details=None)
+    except (ProviderError,ValueError) as e:
+        failed=read(path)['stage']
+        update(path,status='error',confirmed=False,prepared=False,failed_stage=failed,
+               error=f'失败步骤：{failed}。{e}',error_details=getattr(e,'details',{}),stage='PSD 准备未完成，可复用检查点继续')
+    except Exception:
+        update(path,status='error',confirmed=False,prepared=False,stage='PSD 准备未完成',error='本地 PSD 准备失败；已保留已完成的识别与扩图检查点。')
+    finally:
+        with LOCK:ACTIVE.discard(job)
+
+
 @app.get('/')
 def index(): return FileResponse(ROOT/'static/index.html')
 
@@ -108,7 +128,7 @@ def index(): return FileResponse(ROOT/'static/index.html')
 def config():
     return {'sizes':SIZES,'api_configured':bool(settings()['key']),
             'limits':{'min_side':256,'max_side':6000,'max_pixels':24000000,'max_mb':20,'psd_max_mb':100},
-            'models':{'vision':settings()['vision'],'image':settings()['image']}}
+            'models':{'vision':settings()['vision'],'layout':settings()['layout'],'image':settings()['image']}}
 
 
 @app.post('/api/jobs')
@@ -124,10 +144,11 @@ async def upload(file:UploadFile):
         name=re.sub(r'[^\w\-.\u4e00-\u9fff]','_',Path(file.filename or 'design').stem)[:80] or 'design'
         state={'id':job,'filename':file.filename,'name':name,'source_type':'psd',
                'width':data['canvas'][0],'height':data['canvas'][1],'work_width':data['canvas'][0],'work_height':data['canvas'][1],
-               'status':'review','stage':'PSD 已读取，可直接选择画幅 resize 并下载','progress':100,'confirmed':True,
+               'status':'review','stage':'PSD 已读取，等待视觉识别与四周扩图','progress':0,'confirmed':False,'prepared':False,
                'assets':[i['file'] for i in data['layers']]+['psd-layers.json','source.psd'],
                'psd_layers':data['layers'],'quality':quality,'resize_policy':RESIZE_POLICY}
         (path/'job.json').write_text(json.dumps(state,ensure_ascii=False,indent=2))
+        if settings()['key']:return process(job)
         return state
     try: source=read_upload(raw)
     except ValueError as e: raise HTTPException(400,str(e))
@@ -153,8 +174,14 @@ def state(job:str):
 def process(job:str, fresh:bool=False):
     path=folder(job)
     with LOCK:
-        if read(path).get('source_type')=='psd':raise HTTPException(409,'PSD 已有独立图层，请确认图层角色后直接选择尺寸；不需要重新拆分。')
         if job in ACTIVE: raise HTTPException(409,'任务正在处理。')
+        if read(path).get('source_type')=='psd':
+            state=ready_state(path)
+            if state.get('prepared'):return state
+            if not settings()['key']:raise HTTPException(422,'PSD 图层视觉识别与扩图需要 AD_OPENAI_API_KEY，请配置后重启，再点击继续准备。')
+            update(path,status='processing',confirmed=False,stage='准备 PSD 图层识别与扩图',progress=2,error=None,failed_stage=None,error_details=None)
+            ACTIVE.add(job);POOL.submit(run_psd,job)
+            return read(path)
         if read(path)['status']=='review' and not fresh: return read(path)
         if not settings()['key']: raise HTTPException(422,'未配置 AD_OPENAI_API_KEY；请在环境设置或 .env 中配置后重启服务。')
         if fresh:
@@ -199,16 +226,18 @@ def psd_roles(job:str,body:dict):
         if job in ACTIVE:raise HTTPException(409,'任务正在处理。')
         try:data=set_roles(path,body.get('layers'))
         except (ValueError,TypeError) as e:raise HTTPException(400,str(e))
-        for pattern in ['layout-*.json','ai-layout-*.json','preview-*.png','validation-*.json','*.psd']:
+        for pattern in ['layout-*.json','ai-layout-*.json','ai-draft-*.json','preview-*.png','validation-*.json','*.psd']:
             for item in path.glob(pattern):
                 if item.name!='source.psd':item.unlink()
-        return update(path,psd_layers=data['layers'],confirmed=True,stage='PSD 图层角色已更新，可直接选择画幅')
+        ready=bool(background_meta(path,data))
+        return update(path,psd_layers=data['layers'],confirmed=ready,prepared=ready,stage='图层角色已保存'+('，可选择尺寸预览' if ready else '，请继续准备背景扩图'))
 
 
 @app.post('/api/jobs/{job}/ai-layout/{key}')
 def ai_layout(job:str,key:str):
     path=folder(job)
-    if ready_state(path).get('source_type')!='psd':raise HTTPException(409,'请先上传 PSD。')
+    state=ready_state(path)
+    if state.get('source_type')!='psd' or not state.get('prepared'):raise HTTPException(409,'请先完成 PSD 图层识别与背景扩图。')
     if key not in SIZES:raise HTTPException(400,'未知尺寸。')
     with LOCK:
         if job in ACTIVE:raise HTTPException(409,'任务正在处理。')
@@ -219,8 +248,24 @@ def ai_layout(job:str,key:str):
         ACTIVE.add(job)
     try:
         api=OpenAIImages()
-        proposal=api.propose_psd_layout(Image.open(path/'original.png'),catalog(path),SIZES[key],default_layout(path,key))
+        draft_file=path/f'ai-draft-{key}.json'
+        original=Image.open(path/'original.png')
+        if draft_file.exists():draft=normalize_ai_layout(path,json.loads(draft_file.read_text()),key,strict=False)
+        elif saved.exists() and json.loads(saved.read_text()).get('resize_policy')=='expanded-semantic-preview-v3':
+            draft=normalize_ai_layout(path,json.loads(saved.read_text()),key,strict=False)
+        else:
+            proposal=api.propose_psd_layout(original,catalog(path),SIZES[key],default_layout(path,key))
+            draft=normalize_ai_layout(path,proposal,key,strict=False)
+        draft_file.write_text(json.dumps(draft,ensure_ascii=False,indent=2))
+        candidate,_,_=render(path,draft)
+        guide=candidate.convert('RGBA');overlay=Image.new('RGBA',guide.size)
+        l,t,r,b=SIZES[key]['safe'];draw=ImageDraw.Draw(overlay)
+        for x0,y0,x1,y1 in [(0,0,guide.width,t),(0,b,guide.width,guide.height),(0,t,l,b),(r,t,guide.width,b)]:
+            if x1>x0 and y1>y0:draw.rectangle((x0,y0,x1-1,y1-1),fill=(235,104,147,55))
+        guide=Image.alpha_composite(guide,overlay)
+        proposal=api.propose_psd_layout(original,catalog(path),SIZES[key],draft,candidate_preview=guide)
         layout=normalize_ai_layout(path,proposal,key)
+        layout['layout_engine']=api.cfg['layout']+' + visual review'
         with LOCK:
             saved.write_text(json.dumps(layout,ensure_ascii=False,indent=2))
             (path/f'layout-{key}.json').write_text(json.dumps(layout,ensure_ascii=False,indent=2))
@@ -229,6 +274,25 @@ def ai_layout(job:str,key:str):
     except (ValueError,KeyError,TypeError) as e:raise HTTPException(422,'AI 构图未通过坐标与图层检查；保留原构图，可继续手动调整。')
     finally:
         with LOCK:ACTIVE.discard(job)
+
+
+@app.post('/api/jobs/{job}/generate-layout/{key}')
+def generate_layout(job:str,key:str,reset:bool=False):
+    path=folder(job);state=ready_state(path)
+    if state.get('source_type')!='psd' or not state.get('prepared'):raise HTTPException(409,'PSD 识别与扩图尚未完成。')
+    if key not in SIZES:raise HTTPException(400,'未知尺寸。')
+    saved=path/f'layout-{key}.json'
+    if saved.exists() and not reset:
+        cached=json.loads(saved.read_text())
+        if cached.get('resize_policy')==RESIZE_POLICY:return cached
+    if settings()['key']:
+        try:return ai_layout(job,key)
+        except HTTPException as e:
+            # Geometry fallback is explicitly labelled; never claim AI succeeded.
+            layout=default_layout(path,key);layout['layout_notice']='AI 构图未完成，已使用保留原背景与安全区的本地方案。'+str(e.detail)
+            return layout
+    layout=default_layout(path,key);layout['layout_notice']='未调用 AI 构图；使用本地保留原背景方案。'
+    return layout
 
 
 def save_render(job,layout):
@@ -255,6 +319,15 @@ def preview(job:str,layout:dict):
     return {**report,'preview':f'/api/jobs/{job}/assets/preview-{layout["size"]}.png'}
 
 
+@app.post('/api/jobs/{job}/export-jpg')
+def export_jpg(job:str,layout:dict):
+    path,composite,_,report=save_render(job,layout)
+    if report['warnings']:raise HTTPException(422,'请先解决文字/Logo 越界或 PSD 准备问题。')
+    name=read(path)['name']+'-'+layout['size']+'.jpg'
+    composite.convert('RGB').save(path/name,'JPEG',quality=95,subsampling=0)
+    return {'url':f'/api/jobs/{job}/assets/{name}','width':composite.width,'height':composite.height,'report':report}
+
+
 @app.post('/api/jobs/{job}/export')
 def export(job:str,layout:dict):
     path,composite,placed,report=save_render(job,layout)
@@ -276,7 +349,11 @@ def asset(job:str,name:str):
     allowed={'original.png','work.png','text.png','graphics.png','clean.png','expanded.png','reconstructed.png','elements.json'}
     allowed|={f'{prefix}-{key}.{ext}' for key in SIZES for prefix,ext in [('preview','png'),('layout','json'),('validation','json')]}
     allowed|={read(path)['name']+'-'+key+'.psd' for key in SIZES}
+    allowed|={read(path)['name']+'-'+key+'.jpg' for key in SIZES}
+    allowed|={f'background-view-{key}.png' for key in SIZES}
     if read(path).get('source_type')=='psd':
-        allowed|={'source.psd','psd-layers.json'}|{i['file'] for i in catalog(path)['layers']}
+        allowed|={'source.psd','psd-layers.json','background-original.png','psd-contact-sheet.png'}|{i['file'] for i in catalog(path)['layers']}
+        meta=background_meta(path)
+        if meta:allowed.add(meta['file'])
     if name not in allowed or not (path/name).is_file(): raise HTTPException(404,'结果不存在。')
     return FileResponse(path/name,filename=name)

@@ -12,6 +12,7 @@ from psd_tools import PSDImage
 from psd_tools.api.layers import PixelLayer,Group
 from psd_tools.constants import BlendMode
 
+from tests.psd_fixtures import prepared_geometry
 from app import main
 from app.imaging import SIZES,default_layout,render,write_psd
 from app.psd_import import import_psd,catalog,normalize_ai_layout
@@ -37,6 +38,7 @@ def layered_psd():
 @pytest.fixture
 def imported(tmp_path):
     data,quality=import_psd(layered_psd(),tmp_path)
+    data,_=prepared_geometry(tmp_path)
     assert quality['reconstruction_mae']<1
     return tmp_path,data
 
@@ -62,10 +64,10 @@ def test_multi_layer_resize_export_all_sizes(imported,key):
     assert report['warnings']==[]
     out=directory/f'{key}.psd';check=write_psd(out,preview.size,placed,preview)
     assert check['verified']
-    assert check['layers']==['Canvas','背景','标题','Logo','Product','人物组']
+    assert check['layers']==['Canvas','AI background extension','背景','标题','Logo','Product','人物组']
     opened=PSDImage.open(out)
     assert opened.size==(SIZES[key]['width'],SIZES[key]['height'])
-    assert opened[4].topil().getchannel('A').getextrema()[1]==160
+    assert next(l for l in opened if l.name=='Product').topil().getchannel('A').getextrema()[1]==160
 
 
 def test_per_object_safety_and_noncritical_decoration(imported):
@@ -96,14 +98,16 @@ def test_psd_http_without_api_key_and_roles_invalidation(tmp_path,monkeypatch):
     job=result.json();jid=job['id']
     assert job['source_type']=='psd' and job['status']=='review'
     assert len(job['psd_layers'])==5
-    assert client.post(f'/api/jobs/{jid}/process').status_code==409
+    assert client.post(f'/api/jobs/{jid}/process').status_code==422
+    prepared_geometry(tmp_path/jid)
+    client.get(f'/api/jobs/{jid}')
     assert client.post(f'/api/jobs/{jid}/confirm').status_code==200
     for key in SIZES:
         layout=client.get(f'/api/jobs/{jid}/layout/{key}').json()
         assert client.post(f'/api/jobs/{jid}/preview',json=layout).status_code==200
         res=client.post(f'/api/jobs/{jid}/export',json=layout)
         assert res.status_code==200,res.text
-        assert len(res.json()['validation']['layers'])==6
+        assert len(res.json()['validation']['layers'])==7
     assert client.post(f'/api/jobs/{jid}/ai-layout/1080x1080').status_code==422
     cached=default_layout(tmp_path/jid,'1080x1080')
     (tmp_path/jid/'ai-layout-1080x1080.json').write_text(json.dumps(cached))
@@ -143,6 +147,7 @@ def test_small_foreground_auto_layout_respects_scale_limit(tmp_path):
     for name,size,xy in [('Background',(400,400),(0,0)),('Title',(20,20),(180,180))]:
         layer=PixelLayer.frompil(Image.new('RGBA',size,'white' if name=='Background' else 'black'),psd,left=xy[0],top=xy[1]);layer.name=name;psd.append(layer)
     out=io.BytesIO();psd.save(out);import_psd(out.getvalue(),tmp_path)
+    prepared_geometry(tmp_path)
     for key in SIZES:
         layout=default_layout(tmp_path,key)
         assert layout['layers'][0]['scale']<=10
@@ -168,8 +173,9 @@ def bleed_psd():
 def test_resize_uses_original_canvas_and_only_text_logo_are_safe(imported,tmp_path,key):
     directory=tmp_path/'portrait';directory.mkdir()
     data,_=import_psd(bleed_psd(),directory)
+    data,meta=prepared_geometry(directory)
     layout=default_layout(directory,key);by_id={i['id']:i for i in data['layers']}
-    w,h=SIZES[key]['width'],SIZES[key]['height'];scale=max(w/1080,h/1350)
+    w,h=SIZES[key]['width'],SIZES[key]['height'];scale=min(w/1080,h/1350)
     dx,dy=(w-1080*scale)/2,(h-1350*scale)/2
     for tr in layout['layers']:
         info=by_id[tr['id']]
@@ -192,7 +198,8 @@ def test_resize_uses_original_canvas_and_only_text_logo_are_safe(imported,tmp_pa
 def test_photo_and_gradient_can_bleed_but_text_and_logo_block_export(tmp_path,monkeypatch):
     monkeypatch.setattr(main,'DATA',tmp_path);client=TestClient(main.app)
     job=client.post('/api/jobs',files={'file':('portrait.psd',bleed_psd(),'application/octet-stream')}).json()
-    assert job['confirmed'] is True
+    assert job['confirmed'] is False
+    prepared_geometry(tmp_path/job['id'])
     jid=job['id'];base=f'/api/jobs/{jid}'
     layout=client.get(base+'/layout/1080x1350').json()
     info={i['name']:i['id'] for i in layout['layer_info']}
@@ -219,14 +226,15 @@ def test_old_imports_and_layouts_migrate_without_losing_source(tmp_path,monkeypa
     (directory/'layout-1080x1350.json').write_text(json.dumps(previous))
     main.update(directory,confirmed=False,psd_layers=old['layers'],resize_policy=None)
     migrated=client.get(base).json()
-    assert migrated['confirmed']
+    assert not migrated['confirmed']
+    prepared_geometry(directory)
     assert next(i for i in migrated['psd_layers'] if i['name']=='Logo')['category']=='logo'
     assert not next(i for i in migrated['psd_layers'] if i['name']=='白色渐变')['critical']
     layout=client.get(base+'/layout/1080x1350').json()
     assert layout['layers'][0]['x']!=999
     assert client.post(base+'/preview',json=layout).status_code==200
     assert (directory/'layout-1080x1350.before-resize-v2.json').exists()
-    assert (directory/'psd-layers.before-resize-v2.json').exists()
+    assert (directory/'psd-layers.before-resize-v3.json').exists()
     assert (directory/'source.psd').read_bytes()==bleed_psd()
 
 

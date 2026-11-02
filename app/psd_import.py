@@ -16,7 +16,7 @@ from psd_tools.api.layers import AdjustmentLayer
 PSD_MAX_BYTES=100*1024*1024
 ROLES={'background','text','logo','graphics','decoration'}
 MAX_UNITS=60
-RESIZE_POLICY='canvas-cover-text-logo-v2'
+RESIZE_POLICY='expanded-semantic-preview-v4'
 
 
 def is_logo_name(name):
@@ -40,14 +40,16 @@ def catalog(directory):
     path=directory/'psd-layers.json'
     data=json.loads(path.read_text())
     if data.get('resize_policy')!=RESIZE_POLICY:
-        backup=directory/'psd-layers.before-resize-v2.json'
+        backup=directory/'psd-layers.before-resize-v3.json'
         if not backup.exists():backup.write_text(path.read_text())
         for info in data['layers']:
             if info['category']=='graphics' and is_logo_name(info['name']):info['category']='logo'
             info['critical']=info['category'] in {'text','logo'}
         data['warnings']=[message.replace('请确认各层角色；背景采用 cover 裁切，文字与主体默认要求位于安全区内。',
             '可直接点击画幅 resize 并下载。仅文字与 Logo 受安全区约束；图像和渐变允许出血。') for message in data.get('warnings',[])]
+        previous=data.get('resize_policy','')
         data['resize_policy']=RESIZE_POLICY
+        if not previous.startswith('expanded-semantic-preview-'):data['analysis_verified']=False
         path.write_text(json.dumps(data,ensure_ascii=False,indent=2))
     # Role, not a stale caller-supplied critical flag, controls export blocking.
     for info in data['layers']:info['critical']=info['category'] in {'text','logo'}
@@ -95,9 +97,10 @@ def import_psd(raw,directory):
     if not 2<=len(units)<=MAX_UNITS:
         raise ValueError('PSD 需要 2–60 个可见顶层图层/图层组。请将需要独立移动的元素分开放置，不要全部放在一个顶层组中。')
     data={'canvas':[w,h],'resize_policy':RESIZE_POLICY,'layers':[],'tree':[metadata(layer) for layer in psd],
-          'warnings':['PSD 直接读取已有分层，不进行 JPG 拆分，也不调用背景补全或扩图。',
+          'analysis_verified':False,
+          'warnings':['PSD 读取后将识别图层角色与主体，并缓存四周各 50% 的背景扩图。',
                       '顶层图层/组分别渲染为独立栅格层；原生可编辑文字、智能对象、组内层级保留在原始 PSD 中，resize 导出不保留这些编辑属性。',
-                      '可直接点击画幅 resize 并下载。仅文字和 Logo 受安全区约束；照片、渐变与装饰可出血。图层角色可随时修正。']}
+                      '画幅按钮只生成预览；下载 JPG/PSD 时重新渲染当前调整。仅文字与 Logo 受安全区约束。']}
     if any(not layer.visible for layer in psd):
         data['warnings'].append('隐藏顶层仅记录元数据并保留在原始 PSD 中，本次 resize 不导出隐藏层。')
     budget=0
@@ -125,7 +128,7 @@ def import_psd(raw,directory):
         role=guess_role(layer,index,(w,h))
         info={'id':f'psd-{index:03d}','name':layer.name[:200],'file':file,
               'box':[x,y,x+im.width,y+im.height],'category':role,
-              'critical':role in {'text','logo'},'source':metadata(layer)}
+              'critical':role in {'text','logo'},'role_source':'heuristic','source':metadata(layer)}
         data['layers'].append(info)
         rebuilt.alpha_composite(im,(x,y))
     if len(data['layers'])<2:raise ValueError('PSD 中不足两个可渲染的独立图层，请检查可见性与图层内容。')
@@ -162,6 +165,8 @@ def set_roles(directory,roles):
     for info in data['layers']:
         info['category']=next(r['category'] for r in roles if r['id']==info['id'])
         info['critical']=info['category'] in {'text','logo'}
+        info['role_source']='manual'
+    data['analysis_verified']=True
     (directory/'psd-layers.json').write_text(json.dumps(data,ensure_ascii=False,indent=2))
     rebuild_background(directory,data)
     return data
@@ -176,15 +181,29 @@ def default_psd_layout(directory,key):
     data=catalog(directory);infos=layer_info(data)
     if not infos:raise ValueError('没有可移动前景层，请重新指定 PSD 图层角色。')
     cfg=SIZES[key];w,h=cfg['width'],cfg['height'];sw,sh=data['canvas']
-    scale=max(w/sw,h/sh);dx=(w-sw*scale)/2;dy=(h-sh*scale)/2
+    from .psd_workflow import background_meta,frame_geometry,build_background_source,center_subject
+    meta=background_meta(directory,data)
+    if not meta:
+        _,box,subject=build_background_source(directory,data)
+        meta={'native_box':box,'subject_box':subject}
+    bg={'x':.5,'y':.5,'zoom':3}
+    center_subject(meta,(w,h),bg)
+    frame,scale=frame_geometry(meta,(w,h),bg)
+    dx=frame[0]-meta['native_box'][0]*scale;dy=frame[1]-meta['native_box'][1]*scale
+    text_scale=min(w/sw,h/sh)
     layers=[]
     for info in infos:
         x,y,right,bottom=info['box'];iw,ih=right-x,bottom-y
-        layers.append({'id':info['id'],'x':round(dx+x*scale),'y':round(dy+y*scale),'scale':scale})
-    layout={'size':key,'layers':layers,'background':{'x':.5,'y':.5,'zoom':1},
+        if info['critical']:
+            s=text_scale;px=(w-sw*s)/2+x*s;py=(h-sh*s)/2+y*s
+        else:s=scale;px=dx+x*s;py=dy+y*s
+        layers.append({'id':info['id'],'x':round(px),'y':round(py),'scale':s,'whiteout':False})
+    layout={'size':key,'layers':layers,'background':bg,
             'layer_info':infos,'resize_policy':RESIZE_POLICY,
             'source_transform':{'canvas':[sw,sh],'scale':scale,'x':dx,'y':dy}}
     constrain_critical(layout,infos,cfg['safe'],margin=24)
+    subject=meta.get('subject_box',[0,0,1,1]);fw,fh=frame[2]-frame[0],frame[3]-frame[1]
+    layout['subject_bounds']=[frame[0]+subject[0]*fw,frame[1]+subject[1]*fh,frame[0]+subject[2]*fw,frame[1]+subject[3]*fh]
     return layout
 
 
@@ -206,42 +225,58 @@ def render_psd(directory,layout):
     data=catalog(directory);infos=layer_info(data)
     validate_layout(layout,[i['id'] for i in infos])
     cfg=SIZES[layout['size']];w,h=cfg['width'],cfg['height'];size=(w,h)
-    bgcfg=layout['background'];sw,sh=data['canvas'];bgscale=max(w/sw,h/sh)*bgcfg['zoom']
-    cw,ch=w/bgscale,h/bgscale;left=(sw-cw)*bgcfg['x'];top=(sh-ch)*bgcfg['y']
+    from .psd_workflow import background_layers
+    bgcfg=layout['background']
     placed=[('Canvas',Image.new('RGBA',size,'white'),0,0)]
-    # Keep source background units separate in the exported PSD.
-    for info in data['layers']:
-        if info['category']!='background':continue
-        full=Image.new('RGBA',(sw,sh))
-        with Image.open(directory/info['file']) as im:full.alpha_composite(im.convert('RGBA'),tuple(info['box'][:2]))
-        cropped=resize_alpha(full,size,box=(left,top,left+cw,top+ch))
-        placed.append((info['name'],cropped,0,0))
-    warnings=[];bounds=[];safe=cfg['safe']
+    bg_layers,frame,meta,expanded=background_layers(directory,data,size,bgcfg)
+    placed.extend(bg_layers)
+    bg_preview=placed[0][1].copy()
+    for _,im,x,y in placed[1:]:bg_preview.alpha_composite(im,(x,y))
+    bg_preview.save(directory/f'background-view-{layout["size"]}.png')
+    warnings=[];bounds=[];safe=cfg['safe'];critical_images=[]
+    if not expanded:warnings.append('背景尚未完成四周扩图，请先完成 PSD 准备。')
+    if not data.get('analysis_verified'):warnings.append('图层角色尚未视觉识别或人工确认，不能宣称文字/Logo 全部安全。')
     for info in infos:
         tr=next(l for l in layout['layers'] if l['id']==info['id'])
         with Image.open(directory/info['file']) as im:
             nw=max(1,round(im.width*tr['scale']));nh=max(1,round(im.height*tr['scale']))
             if nw*nh>32000000:raise ValueError('图层缩放后过大。')
             im=resize_alpha(im.convert('RGBA'),(nw,nh))
+        if tr.get('whiteout'):
+            alpha=im.getchannel('A');im=Image.new('RGBA',im.size,'white');im.putalpha(alpha)
         x,y=round(tr['x']),round(tr['y']);rect=[x,y,x+nw,y+nh]
         outside=rect[0]<safe[0] or rect[1]<safe[1] or rect[2]>safe[2] or rect[3]>safe[3]
         if outside and info['critical']:warnings.append(f'“{info["name"]}”超出安全区')
+        if info['critical']:critical_images.append((info['name'],im,x,y))
         bounds.append({'id':info['id'],'name':info['name'],'box':rect,'outside':outside,'critical':info['critical']})
         placed.append((info['name'],im,x,y))
+    # Bounding boxes alone can overlap legitimately in transparent whitespace.
+    # Reject actual opaque text/logo pixel collisions instead of a false green.
+    for index,(name,a,ax,ay) in enumerate(critical_images):
+        for other,b,bx,by in critical_images[index+1:]:
+            l,t=max(ax,bx),max(ay,by);r,bt=min(ax+a.width,bx+b.width),min(ay+a.height,by+b.height)
+            if l>=r or t>=bt:continue
+            aa=np.asarray(a.getchannel('A').crop((l-ax,t-ay,r-ax,bt-ay)))
+            ba=np.asarray(b.getchannel('A').crop((l-bx,t-by,r-bx,bt-by)))
+            if ((aa>24)&(ba>24)).sum()>24:warnings.append(f'文字/Logo“{name}”与“{other}”发生像素遮挡，请调整。')
     composite=placed[0][1].copy()
     for _,im,x,y in placed[1:]:composite.alpha_composite(im,(x,y))
-    return composite,placed,{'warnings':warnings,'bounds':bounds,'safe':safe,'width':w,'height':h}
+    return composite,placed,{'warnings':warnings,'bounds':bounds,'safe':safe,'width':w,'height':h,'background_frame':frame,'background_expanded':expanded,'roles_verified':bool(data.get('analysis_verified'))}
 
 
-def normalize_ai_layout(directory,proposal,key):
+def normalize_ai_layout(directory,proposal,key,strict=True):
     """AI proposes; the program validates IDs, exact pixels and safe bounds."""
     from .imaging import SIZES,validate_layout
     baseline=default_psd_layout(directory,key);infos=baseline['layer_info'];ids=[i['id'] for i in infos]
     if not isinstance(proposal,dict):raise ValueError('AI 构图数据无效。')
     candidate={'size':key,'layers':proposal.get('layers'),'background':proposal.get('background',baseline['background'])}
     validate_layout(candidate,ids)
+    from .psd_workflow import background_meta,center_subject
+    meta=background_meta(directory)
+    if meta:center_subject(meta,(SIZES[key]['width'],SIZES[key]['height']),candidate['background'])
     constrain_critical(candidate,infos,SIZES[key]['safe'])
     candidate['layer_info']=infos
     candidate['resize_policy']=RESIZE_POLICY
-    render_psd(directory,candidate)
+    _,_,report=render_psd(directory,candidate)
+    if strict and report['warnings']:raise ValueError('AI 构图存在越界、遮挡或准备问题。')
     return candidate
