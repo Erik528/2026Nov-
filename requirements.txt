@@ -1,0 +1,10 @@
+fastapi==0.141.1
+uvicorn==0.52.1
+httpx==0.28.1
+Pillow==12.3.0
+numpy==2.3.5
+opencv-python-headless==4.11.0.86
+psd-tools==1.10.9
+python-multipart==0.0.20
+python-dotenv==1.1.0
+pytest==8.3.5

@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ad Atelier · 广告多尺寸工作台</title><link rel="stylesheet" href="/static/style.css"></head>
+<body>
+<header><a class="brand" href="/">a<span>↗</span> <b>AD ATELIER</b></a><span class="header-label">META CREATIVE WORKSPACE</span><span class="badge">LOCAL PROTOTYPE · 01</span></header>
+<main>
+<section class="intro"><div><p class="eyebrow">ONE DESIGN. MORE POSSIBILITIES.</p><h1>让好设计，<em>适应每一种画幅。</em></h1><p class="subtitle">保留原图文字与主体，扩展背景，在安全区内重新构图。交付真正分层的 PSD。</p></div><span class="intro-mark">↗</span></section>
+<nav class="steps"><span id="step1" class="active"><i>01</i> 上传与拆分</span><span id="step2"><i>02</i> 审核素材</span><span id="step3"><i>03</i> 构图与导出</span></nav>
+<div id="notice" role="status" class="notice" hidden></div>
+<div class="workspace">
+<aside>
+<section class="panel"><div class="panel-title"><h2>原始创意</h2><span>01 / SOURCE</span></div>
+<label class="upload" id="dropzone"><input type="file" id="file" accept="image/jpeg,.jpg,.jpeg" hidden><span class="upload-icon">↑</span><strong>选择或拖入 JPG 广告图</strong><small>短边 ≥ 256 px · 最大 20 MB / 2400 万像素</small></label>
+<div id="sourceInfo" hidden><img id="source" alt="原始广告图"><strong id="filename"></strong><p id="dimensions" class="muted"></p></div>
+<button id="process" class="primary" disabled>拆分并扩图 <span>↗</span></button>
+<div id="status" class="status" aria-live="polite">上传一张成品广告，开始重构。</div><progress id="progress" value="0" max="100" hidden></progress>
+<div class="row"><button id="resume" hidden>继续处理（复用缓存）</button><button id="retry" hidden>重新拆分</button></div>
+<p class="footnote">拆分与扩图会调用付费 API。已完成的步骤自动保留；重新拆分会清除当前结果并再次调用。</p>
+</section>
+<section class="panel"><div class="panel-title"><h2>输出画幅</h2><span>02 / FORMAT</span></div><div id="sizes" class="sizes"></div><p class="footnote">审核并确认拆分结果后，选择画幅。四种画幅共用同一张扩展底图。</p></section>
+<section class="panel" id="controls" hidden><div class="panel-title"><h2>图层调整</h2><span>03 / LAYERS</span></div>
+<label class="field">当前图层<select id="layer"><option value="text">文字 · 栅格层</option><option value="graphics">图案 · Logo 与主体</option></select></label>
+<div class="input-pair"><label class="field">X / px<input type="number" id="x" step="1"></label><label class="field">Y / px<input type="number" id="y" step="1"></label></div>
+<label class="field">缩放 / %<input type="number" id="scale" min="1" max="1000" step="1"></label>
+<p class="footnote">可直接在预览中拖动当前图层。文字与图案分别为合并栅格层。</p>
+<div class="divider"></div><h3>背景裁切</h3>
+<label class="field range">水平<input type="range" id="bgx" min="0" max="1" step="0.01" value="0.5"></label>
+<label class="field range">垂直<input type="range" id="bgy" min="0" max="1" step="0.01" value="0.5"></label>
+<label class="field range">放大<input type="range" id="bgzoom" min="1" max="3" step="0.01" value="1"></label>
+<button id="reset" class="full">恢复自动构图</button>
+</section>
+</aside>
+<div class="content">
+<section class="panel preview-panel"><div class="preview-top"><div><p class="eyebrow">CREATIVE CANVAS</p><h2 id="canvasTitle">你的下一张广告，从这里开始</h2></div><label id="safeToggleWrap" hidden><input type="checkbox" id="safeToggle" checked> 安全区遮罩</label></div>
+<div id="empty" class="empty"><div class="frames"><span></span><span></span><span></span></div><h3>一次拆分，四种可能</h3><p>上传设计，审核独立素材，再为每个版位调整构图。</p><div class="format-labels">1:1 <b>·</b> 4:5 <b>·</b> 9:16 <b>·</b> 1.91:1</div></div>
+<div id="review" hidden><p class="review-note">对照原图检查拼写、Logo、边缘与背景残留。此结果尚未经过人工确认。</p><div class="comparison"><figure><img id="reviewOriginal" alt="原图"><figcaption>原始广告</figcaption></figure><figure><img id="reconstruction" alt="拆分后重叠合成"><figcaption>拆分后重叠合成</figcaption></figure></div><ul id="quality" class="warnings"></ul><button class="primary" id="confirm">我已检查素材，进入构图 →</button></div>
+<div id="editor" hidden><div class="canvas-stage"><canvas id="canvas" aria-label="可拖拽调整广告图层的画布"></canvas></div><div id="safeReport" role="status"></div></div>
+<div class="preview-bottom"><span id="previewLabel">所有坐标与安全区由程序统一计算</span><span>RGB / 8 BIT</span></div>
+</section>
+<section class="panel" id="assetsPanel" hidden><div class="panel-title"><h2>拆分素材</h2><span>INTERMEDIATE ASSETS</span></div><div id="assets" class="assets"></div></section>
+<section class="panel export-panel"><div><h2>把创意带回 Photoshop</h2><p class="muted">背景 / 图案 / 文字 · 三个独立图层。文字保留原始像素，不是可编辑文字层。</p></div><button id="export" class="primary" disabled>导出 PSD ↓</button><div id="downloads"></div></section>
+</div>
+</div>
+<footer><span>AD ATELIER — DESIGNED TO ADAPT.</span><span>安全区是排版约束 · 拆分质量需要人工审核</span></footer>
+</main><script src="/static/app.js"></script>
+</body></html>
