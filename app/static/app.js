@@ -76,11 +76,11 @@ async function review(){
   const a=document.createElement('a');a.href=asset(name);a.download=name;a.textContent=title+' ↓';
   const small=document.createElement('small');small.textContent=desc;card.append(im,a,small);$('assets').append(card);
  }
- notice(isPSD()?'PSD 分层已读取，无需 AI 拆图。确认图层角色后可直接选择尺寸；背景采用裁切适配。':'拆分完成，等待你审核。可下载素材放大检查；发现明显残留或破损时请重新处理。');renderRoles();
- if(job.confirmed){sizeEnabled(true);notice('已恢复已确认的拆分结果，可选择尺寸继续构图。');}
+ notice(isPSD()?'PSD 已读取：点击输出画幅即自动 resize 并下载 PSD。仅文字与 Logo 受安全区约束，图像/渐变可出血。':'拆分完成，等待你审核。可下载素材放大检查；发现明显残留或破损时请重新处理。');renderRoles();
+ show('confirm',!isPSD());if(job.confirmed){sizeEnabled(true);if(!isPSD())notice('已恢复已确认的拆分结果，可选择尺寸继续构图。');}
 }
 $('confirm').onclick=async()=>{try{if(isPSD()){const layers=[...$('psdLayerRoles').querySelectorAll('select')].map(s=>({id:s.dataset.layerId,category:s.value}));if(layers.some(r=>job.psd_layers.find(i=>i.id===r.id).category!==r.category))job=await post(`/api/jobs/${job.id}/psd-roles`,{layers});}job=await post(`/api/jobs/${job.id}/confirm`);sizeEnabled(true);await choose('1080x1080');}catch(e){notice(e.message,true);}};
-async function choose(key,reset=false){
+async function choose(key,reset=false,autoDownload=false){
  if(busy)return;
  setBusy(true);$('downloads').replaceChildren();report=null;
  try{
@@ -93,7 +93,8 @@ async function choose(key,reset=false){
   show('aiLayout',isPSD());show('aiHelp',isPSD());$('aiLayout').disabled=!cfg.api_configured;show('review',false);show('empty',false);show('editor');show('controls');show('safeToggleWrap');steps(3);
   document.querySelectorAll('.size').forEach(b=>b.classList.toggle('selected',b.dataset.key===key));
   $('canvasTitle').textContent=key.replace('x',' × ')+' px';$('previewLabel').textContent='拖动选中图层 · 粉色为安全区外区域';
-  updateFields();await refresh();notice('构图已生成。调整图层或背景裁切后，程序会重新检查安全区。');
+  updateFields();await refresh();notice(isPSD()?'已按原画布等比 resize；仅文字与 Logo 内收至安全区。照片、渐变与装饰可出血。':'构图已生成。调整图层或背景裁切后，程序会重新检查安全区。');
+  if(autoDownload&&!report.warnings.length){setBusy(false);await exportCurrent(true);}
  }catch(e){notice(e.message,true);}finally{setBusy(false);}
 }
 function selected(){return layout.layers.find(l=>l.id===$('layer').value);}
@@ -117,7 +118,7 @@ async function refresh(){
  if(version!==previewVersion)return;
  report=response;images.preview=await image(response.preview+`?v=${Date.now()}`);
  if(version!==previewVersion)return;
- $('safeReport').textContent=report.warnings.length?report.warnings.join('；'):'✓ 文字与图案完整位于安全区内。';
+ $('safeReport').textContent=report.warnings.length?report.warnings.join('；'):(!isPSD()&&report.logo_regions_checked===0?'✓ 文字位于安全区内；图像允许出血。未识别到独立 Logo，请人工检查。':'✓ 文字与 Logo 位于安全区内；图像、渐变与装饰允许出血。');
  $('safeReport').classList.toggle('danger',!!report.warnings.length);
  $('export').disabled=!!report.warnings.length;draw();
 }
@@ -143,27 +144,29 @@ function point(e){const rect=$('canvas').getBoundingClientRect();return [(e.clie
 $('canvas').onpointerdown=e=>{if(!layout||busy)return;const [x,y]=point(e);pointer={x,y,startX:selected().x,startY:selected().y};$('canvas').setPointerCapture(e.pointerId);};
 $('canvas').onpointermove=e=>{if(!pointer)return;const [x,y]=point(e);selected().x=Math.round(pointer.startX+x-pointer.x);selected().y=Math.round(pointer.startY+y-pointer.y);updateFields();changed();};
 $('canvas').onpointerup=()=>{pointer=null;};$('canvas').onpointercancel=()=>{pointer=null;};
-$('export').onclick=async()=>{
+async function exportCurrent(download=false){
  if(busy||!layout)return;
  try{setBusy(true);$('export').disabled=true;notice('正在写入并重新读取 PSD，检查图层、透明度与合成…');
   const out=await post(`/api/jobs/${job.id}/export`,structuredClone(layout));$('downloads').replaceChildren();
   for(const [url,label] of [[out.url,'下载分层 PSD ↓'],[out.preview,'下载合成 PNG ↓'],[asset('layout-'+layout.size+'.json'),'下载构图 JSON ↓'],[asset('validation-'+layout.size+'.json'),'PSD 检查报告 ↓']]){const a=document.createElement('a');a.href=url;a.download='';a.textContent=label;$('downloads').append(a);}
-  notice(`PSD 已通过读取验证：${out.validation.canvas.join(' × ')} px，${out.validation.layers.length} 个独立图层。请下载后在 Photoshop 中检查。`);
+  notice(`PSD 已通过读取验证：${out.validation.canvas.join(' × ')} px，${out.validation.layers.length} 个独立图层。${download?'已启动下载。':'可下载后在 Photoshop 中检查。'}`);
+  if(download){const a=document.createElement('a');a.href=out.url;a.download='';document.body.append(a);a.click();a.remove();}
  }catch(e){notice(e.message,true);}finally{setBusy(false);$('export').disabled=!report||!!report.warnings.length;}
-};
+}
+$('export').onclick=()=>exportCurrent(false);
 function renderRoles(){
  show('psdLayersPanel',isPSD());if(!isPSD())return;
  $('psdLayerRoles').replaceChildren();
  for(const item of job.psd_layers){const row=document.createElement('label');row.className='field';const title=document.createElement('span');title.textContent=item.name+' · '+item.source.kind;
   const select=document.createElement('select');select.dataset.layerId=item.id;
-  for(const [value,label] of [['background','背景'],['text','文字（关键）'],['graphics','主体 / Logo（关键）'],['decoration','装饰（允许出血）']]){const option=document.createElement('option');option.value=value;option.textContent=label;select.append(option);}select.value=item.category;row.append(title,select);$('psdLayerRoles').append(row);
+  for(const [value,label] of [['background','背景'],['text','文字（安全区内）'],['logo','Logo（安全区内）'],['graphics','图像 / 渐变（可出血）'],['decoration','装饰（允许出血）']]){const option=document.createElement('option');option.value=value;option.textContent=label;select.append(option);}select.value=item.category;row.append(title,select);$('psdLayerRoles').append(row);
  }
 }
 $('applyRoles').onclick=async()=>{
- if(busy)return;
+ if(busy)return;const previousKey=layout?.size;
  try{setBusy(true);const layers=[...$('psdLayerRoles').querySelectorAll('select')].map(s=>({id:s.dataset.layerId,category:s.value}));
   job=await post(`/api/jobs/${job.id}/psd-roles`,{layers});layout=null;report=null;images={};previewVersion++;clearTimeout(renderTimer);
-  ['editor','controls','safeToggleWrap'].forEach(i=>show(i,false));$('downloads').replaceChildren();$('export').disabled=true;sizeEnabled(false);await review();
+  ['editor','controls','safeToggleWrap'].forEach(i=>show(i,false));$('downloads').replaceChildren();$('export').disabled=true;await review();if(previousKey){setBusy(false);await choose(previousKey);}
  }catch(e){notice(e.message,true);}finally{setBusy(false);}
 };
 $('aiLayout').onclick=async()=>{
@@ -177,7 +180,7 @@ $('aiLayout').onclick=async()=>{
  try{
   cfg=await api('/api/config');
   for(const [key,spec] of Object.entries(cfg.sizes)){
-   const b=document.createElement('button');b.className='size';b.dataset.key=key;b.disabled=true;b.innerHTML=`<span class="icon"></span><b>${spec.width} × ${spec.height}</b><small>${{'1080x1080':'FEED · 1:1','1080x1350':'FEED · 4:5','1080x1920':'STORY · 9:16','1200x628':'LANDSCAPE'}[key]}</small>`;b.onclick=()=>choose(key);$('sizes').append(b);
+   const b=document.createElement('button');b.className='size';b.dataset.key=key;b.disabled=true;b.innerHTML=`<span class="icon"></span><b>${spec.width} × ${spec.height}</b><small>${{'1080x1080':'FEED · 1:1','1080x1350':'FEED · 4:5','1080x1920':'STORY · 9:16','1200x628':'LANDSCAPE'}[key]}</small>`;b.onclick=()=>choose(key,false,isPSD());$('sizes').append(b);
   }
   if(!cfg.api_configured)notice('PSD 上传、分层 resize 与导出可直接使用；JPG 拆分、扩图及可选 AI 构图需要在 .env 配置 API 密钥并重启。');
   const previous=localStorage.getItem('ad-atelier-job');

@@ -160,9 +160,15 @@ def render(directory, layout):
     placed=[('Background',bg,0,0)]
     warnings=[]; bounds=[]
     safe=cfg['safe']
+    elements=[]
+    if (directory/'elements.json').exists():
+        elements=json.loads((directory/'elements.json').read_text())
+    from .psd_import import is_logo_name
+    logo_checks=0
     for name in ['graphics','text']:
         transform=next(x for x in layout['layers'] if x['id']==name)
         with Image.open(directory/f'{name}.png') as img:
+            source_w,source_h=img.size
             box=img.getchannel('A').getbbox()
             img=img.crop(box).convert('RGBA')
             nw=max(1,round(img.width*transform['scale'])); nh=max(1,round(img.height*transform['scale']))
@@ -171,12 +177,24 @@ def render(directory, layout):
         x,y=round(transform['x']),round(transform['y'])
         rect=[x,y,x+nw,y+nh]
         outside=rect[0]<safe[0] or rect[1]<safe[1] or rect[2]>safe[2] or rect[3]>safe[3]
-        if outside: warnings.append(f'{"文字" if name=="text" else "图案（含 Logo/主体）"}层超出安全区')
-        bounds.append({'id':name,'box':rect,'outside':outside})
+        if outside and name=='text':warnings.append('文字层超出安全区')
+        logo_regions=[]
+        if name=='graphics':
+            for element in elements:
+                if element.get('category')!='graphics' or not (element.get('role')=='logo' or is_logo_name(element.get('label',''))):continue
+                l,t,r,b=element['box'];s=transform['scale']
+                region=[x+round((max(box[0],l*source_w)-box[0])*s),y+round((max(box[1],t*source_h)-box[1])*s),
+                        x+round((min(box[2],r*source_w)-box[0])*s),y+round((min(box[3],b*source_h)-box[1])*s)]
+                if region[2]<=region[0] or region[3]<=region[1]:continue
+                region_outside=region[0]<safe[0] or region[1]<safe[1] or region[2]>safe[2] or region[3]>safe[3]
+                label=element.get('label','Logo');logo_checks+=1
+                logo_regions.append({'name':label,'box':region,'outside':region_outside})
+                if region_outside:warnings.append(f'Logo“{label}”超出安全区')
+        bounds.append({'id':name,'box':rect,'outside':outside,'critical':name=='text','logo_regions':logo_regions})
         placed.append(('Text (raster)' if name=='text' else 'Graphics',img,x,y))
     composite=bg.copy()
     for _,img,x,y in placed[1:]: composite.alpha_composite(img,(x,y))
-    return composite,placed,{'warnings':warnings,'bounds':bounds,'safe':safe,'width':size[0],'height':size[1]}
+    return composite,placed,{'warnings':warnings,'bounds':bounds,'safe':safe,'width':size[0],'height':size[1],'logo_regions_checked':logo_checks}
 
 
 def write_psd(path, size, placed, preview):

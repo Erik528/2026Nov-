@@ -113,7 +113,7 @@ def test_psd_http_without_api_key_and_roles_invalidation(tmp_path,monkeypatch):
     assert client.get(f'/api/jobs/{jid}/layout/1080x1080').json()==cached
     roles=[{'id':i['id'],'category':i['category']} for i in job['psd_layers']];roles[1]['category']='decoration'
     assert client.post(f'/api/jobs/{jid}/psd-roles',json={'layers':roles}).status_code==200
-    assert client.get(f'/api/jobs/{jid}/layout/1080x1080').status_code==409
+    assert client.get(f'/api/jobs/{jid}/layout/1080x1080').status_code==200
     assert not list((tmp_path/jid).glob('layout-*.json'))
     assert not list((tmp_path/jid).glob('real-layered-*.psd'))
     assert client.get(f'/api/jobs/{jid}/assets/source.psd').content==layered_psd()
@@ -147,3 +147,92 @@ def test_small_foreground_auto_layout_respects_scale_limit(tmp_path):
         layout=default_layout(tmp_path,key)
         assert layout['layers'][0]['scale']<=10
         assert render(tmp_path,layout)[2]['warnings']==[]
+
+
+def bleed_psd():
+    """A portrait ad with text/logo and a large white gradient image overlay."""
+    psd=PSDImage.new('RGBA',(1080,1350),color=(255,255,255,255))
+    def add(name,image,xy):
+        layer=PixelLayer.frompil(image,psd,left=xy[0],top=xy[1]);layer.name=name;psd.append(layer)
+    add('Background',Image.new('RGBA',(1080,1350),'#d5a99a'),(0,0))
+    add('照片',Image.new('RGBA',(650,760),'#53745e'),(250,350))
+    overlay=Image.new('RGBA',(1000,700),'white')
+    a=Image.linear_gradient('L').resize(overlay.size);overlay.putalpha(a)
+    add('白色渐变',overlay,(20,650))
+    add('标题文字',Image.new('RGBA',(500,160),'#004499'),(80,280))
+    add('Logo',Image.new('RGBA',(140,55),'#dd3333'),(760,1020))
+    out=io.BytesIO();psd.save(out);return out.getvalue()
+
+
+@pytest.mark.parametrize('key',list(SIZES))
+def test_resize_uses_original_canvas_and_only_text_logo_are_safe(imported,tmp_path,key):
+    directory=tmp_path/'portrait';directory.mkdir()
+    data,_=import_psd(bleed_psd(),directory)
+    layout=default_layout(directory,key);by_id={i['id']:i for i in data['layers']}
+    w,h=SIZES[key]['width'],SIZES[key]['height'];scale=max(w/1080,h/1350)
+    dx,dy=(w-1080*scale)/2,(h-1350*scale)/2
+    for tr in layout['layers']:
+        info=by_id[tr['id']]
+        if info['category']=='graphics':
+            assert not info['critical']
+            assert tr['scale']==scale
+            assert (tr['x'],tr['y'])==(round(dx+info['box'][0]*scale),round(dy+info['box'][1]*scale))
+    preview,placed,report=render(directory,layout)
+    assert not report['warnings']
+    gradient=next(i for i in data['layers'] if i['name']=='白色渐变')
+    bound=next(b for b in report['bounds'] if b['id']==gradient['id'])
+    assert bound['outside'] and not bound['critical']
+    if key=='1080x1350':
+        tr=next(tr for tr in layout['layers'] if tr['id']==gradient['id'])
+        assert tr['scale']==1
+        assert (tr['x'],tr['y'])==tuple(gradient['box'][:2])
+    write_psd(directory/f'bleed-{key}.psd',preview.size,placed,preview)
+
+
+def test_photo_and_gradient_can_bleed_but_text_and_logo_block_export(tmp_path,monkeypatch):
+    monkeypatch.setattr(main,'DATA',tmp_path);client=TestClient(main.app)
+    job=client.post('/api/jobs',files={'file':('portrait.psd',bleed_psd(),'application/octet-stream')}).json()
+    assert job['confirmed'] is True
+    jid=job['id'];base=f'/api/jobs/{jid}'
+    layout=client.get(base+'/layout/1080x1350').json()
+    info={i['name']:i['id'] for i in layout['layer_info']}
+    next(t for t in layout['layers'] if t['id']==info['白色渐变'])['x']=-100
+    assert client.post(base+'/export',json=layout).status_code==200
+    for name in ['标题文字','Logo']:
+        changed=json.loads(json.dumps(layout));next(t for t in changed['layers'] if t['id']==info[name])['x']=-100
+        report=client.post(base+'/preview',json=changed).json()
+        assert any(name in w for w in report['warnings'])
+        assert client.post(base+'/export',json=changed).status_code==422
+
+
+def test_old_imports_and_layouts_migrate_without_losing_source(tmp_path,monkeypatch):
+    monkeypatch.setattr(main,'DATA',tmp_path);client=TestClient(main.app)
+    job=client.post('/api/jobs',files={'file':('legacy.psd',bleed_psd(),'application/octet-stream')}).json()
+    directory=tmp_path/job['id'];base=f'/api/jobs/{job["id"]}'
+    old=catalog(directory);old.pop('resize_policy')
+    for i in old['layers']:
+        if i['category']=='logo':i['category']='graphics'
+        i['critical']=i['category'] in {'text','graphics'}
+    (directory/'psd-layers.json').write_text(json.dumps(old))
+    previous=default_layout(directory,'1080x1350');previous.pop('resize_policy');previous['layers'][0]['x']=999
+    (directory/'psd-layers.json').write_text(json.dumps(old))
+    (directory/'layout-1080x1350.json').write_text(json.dumps(previous))
+    main.update(directory,confirmed=False,psd_layers=old['layers'],resize_policy=None)
+    migrated=client.get(base).json()
+    assert migrated['confirmed']
+    assert next(i for i in migrated['psd_layers'] if i['name']=='Logo')['category']=='logo'
+    assert not next(i for i in migrated['psd_layers'] if i['name']=='白色渐变')['critical']
+    layout=client.get(base+'/layout/1080x1350').json()
+    assert layout['layers'][0]['x']!=999
+    assert client.post(base+'/preview',json=layout).status_code==200
+    assert (directory/'layout-1080x1350.before-resize-v2.json').exists()
+    assert (directory/'psd-layers.before-resize-v2.json').exists()
+    assert (directory/'source.psd').read_bytes()==bleed_psd()
+
+
+def test_gradient_copy_is_an_image_not_copy_text(tmp_path):
+    psd=PSDImage.open(io.BytesIO(bleed_psd()));psd[2].name='White gradient copy'
+    out=io.BytesIO();psd.save(out)
+    data,_=import_psd(out.getvalue(),tmp_path)
+    gradient=next(i for i in data['layers'] if i['name']=='White gradient copy')
+    assert gradient['category']=='graphics' and not gradient['critical']

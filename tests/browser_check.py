@@ -47,6 +47,7 @@ with sync_playwright() as p:
   with Image.open(OUT/f'browser-{key}.psd') as downloaded:
    assert downloaded.size==tuple(map(int,key.split('x'))),(key,downloaded.size)
   page.screenshot(path=str(OUT/f'{key}.png'),full_page=True)
+ page.locator('#layer').select_option('text')
  page.locator('#x').fill('-500');page.locator('#x').dispatch_event('input')
  page.wait_for_function("document.querySelector('#safeReport').classList.contains('danger')")
  assert page.locator('#export').is_disabled()

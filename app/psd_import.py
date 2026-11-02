@@ -14,8 +14,13 @@ from psd_tools import PSDImage
 from psd_tools.api.layers import AdjustmentLayer
 
 PSD_MAX_BYTES=100*1024*1024
-ROLES={'background','text','graphics','decoration'}
+ROLES={'background','text','logo','graphics','decoration'}
 MAX_UNITS=60
+RESIZE_POLICY='canvas-cover-text-logo-v2'
+
+
+def is_logo_name(name):
+    return bool(re.search(r'logo|商标|标志|品牌标识|品牌标志',name,re.I))
 
 
 def white(image):
@@ -32,7 +37,21 @@ def resize_alpha(image,size,**kwargs):
 
 
 def catalog(directory):
-    return json.loads((directory/'psd-layers.json').read_text())
+    path=directory/'psd-layers.json'
+    data=json.loads(path.read_text())
+    if data.get('resize_policy')!=RESIZE_POLICY:
+        backup=directory/'psd-layers.before-resize-v2.json'
+        if not backup.exists():backup.write_text(path.read_text())
+        for info in data['layers']:
+            if info['category']=='graphics' and is_logo_name(info['name']):info['category']='logo'
+            info['critical']=info['category'] in {'text','logo'}
+        data['warnings']=[message.replace('请确认各层角色；背景采用 cover 裁切，文字与主体默认要求位于安全区内。',
+            '可直接点击画幅 resize 并下载。仅文字与 Logo 受安全区约束；图像和渐变允许出血。') for message in data.get('warnings',[])]
+        data['resize_policy']=RESIZE_POLICY
+        path.write_text(json.dumps(data,ensure_ascii=False,indent=2))
+    # Role, not a stale caller-supplied critical flag, controls export blocking.
+    for info in data['layers']:info['critical']=info['category'] in {'text','logo'}
+    return data
 
 
 def metadata(layer):
@@ -48,8 +67,12 @@ def metadata(layer):
 
 def guess_role(layer,index,canvas):
     name=layer.name.lower()
+    if layer.kind=='type':return 'text'
+    if is_logo_name(name):return 'logo'
     if re.search(r'background|backdrop|背景|底图|底色|^bg(?:\b|_)',name):return 'background'
-    if layer.kind=='type' or re.search(r'text|headline|title|copy|price|cta|文字|标题|文案|价格',name):return 'text'
+    if layer.kind=='gradientfill' or re.search(r'gradient|渐变',name):return 'graphics'
+    if re.search(r'text|headline|title|body.?copy|price|cta|文字|标题|文案|价格',name):return 'text'
+    if layer.is_group() and any(child.kind=='type' and child.is_visible() for child in layer.descendants()):return 'text'
     l,t,r,b=layer.bbox;w,h=canvas
     if index==0 and l<=0 and t<=0 and r>=w and b>=h:return 'background'
     return 'graphics'
@@ -71,10 +94,10 @@ def import_psd(raw,directory):
     units=[layer for layer in psd if layer.visible]
     if not 2<=len(units)<=MAX_UNITS:
         raise ValueError('PSD 需要 2–60 个可见顶层图层/图层组。请将需要独立移动的元素分开放置，不要全部放在一个顶层组中。')
-    data={'canvas':[w,h],'layers':[],'tree':[metadata(layer) for layer in psd],
+    data={'canvas':[w,h],'resize_policy':RESIZE_POLICY,'layers':[],'tree':[metadata(layer) for layer in psd],
           'warnings':['PSD 直接读取已有分层，不进行 JPG 拆分，也不调用背景补全或扩图。',
                       '顶层图层/组分别渲染为独立栅格层；原生可编辑文字、智能对象、组内层级保留在原始 PSD 中，resize 导出不保留这些编辑属性。',
-                      '请确认各层角色；背景采用 cover 裁切，文字与主体默认要求位于安全区内。']}
+                      '可直接点击画幅 resize 并下载。仅文字和 Logo 受安全区约束；照片、渐变与装饰可出血。图层角色可随时修正。']}
     if any(not layer.visible for layer in psd):
         data['warnings'].append('隐藏顶层仅记录元数据并保留在原始 PSD 中，本次 resize 不导出隐藏层。')
     budget=0
@@ -102,7 +125,7 @@ def import_psd(raw,directory):
         role=guess_role(layer,index,(w,h))
         info={'id':f'psd-{index:03d}','name':layer.name[:200],'file':file,
               'box':[x,y,x+im.width,y+im.height],'category':role,
-              'critical':role in {'text','graphics'},'source':metadata(layer)}
+              'critical':role in {'text','logo'},'source':metadata(layer)}
         data['layers'].append(info)
         rebuilt.alpha_composite(im,(x,y))
     if len(data['layers'])<2:raise ValueError('PSD 中不足两个可渲染的独立图层，请检查可见性与图层内容。')
@@ -138,7 +161,7 @@ def set_roles(directory,roles):
     if not any(r['category']!='background' for r in roles):raise ValueError('至少保留一个可移动的文字、主体或装饰层。')
     for info in data['layers']:
         info['category']=next(r['category'] for r in roles if r['id']==info['id'])
-        info['critical']=info['category'] in {'text','graphics'}
+        info['critical']=info['category'] in {'text','logo'}
     (directory/'psd-layers.json').write_text(json.dumps(data,ensure_ascii=False,indent=2))
     rebuild_background(directory,data)
     return data
@@ -152,14 +175,30 @@ def default_psd_layout(directory,key):
     from .imaging import SIZES
     data=catalog(directory);infos=layer_info(data)
     if not infos:raise ValueError('没有可移动前景层，请重新指定 PSD 图层角色。')
-    l,t,r,b=SIZES[key]['safe'];margin=24
-    anchor=[info for info in infos if info['critical']] or infos
-    union=[min(i['box'][0] for i in anchor),min(i['box'][1] for i in anchor),max(i['box'][2] for i in anchor),max(i['box'][3] for i in anchor)]
-    uw,uh=union[2]-union[0],union[3]-union[1]
-    scale=min(10,(r-l-2*margin)/uw,(b-t-2*margin)/uh)
-    x0=l+(r-l-uw*scale)/2;y0=t+(b-t-uh*scale)/2
-    return {'size':key,'layers':[{'id':i['id'],'x':round(x0+(i['box'][0]-union[0])*scale),'y':round(y0+(i['box'][1]-union[1])*scale),'scale':scale} for i in infos],
-            'background':{'x':.5,'y':.5,'zoom':1},'layer_info':infos}
+    cfg=SIZES[key];w,h=cfg['width'],cfg['height'];sw,sh=data['canvas']
+    scale=max(w/sw,h/sh);dx=(w-sw*scale)/2;dy=(h-sh*scale)/2
+    layers=[]
+    for info in infos:
+        x,y,right,bottom=info['box'];iw,ih=right-x,bottom-y
+        layers.append({'id':info['id'],'x':round(dx+x*scale),'y':round(dy+y*scale),'scale':scale})
+    layout={'size':key,'layers':layers,'background':{'x':.5,'y':.5,'zoom':1},
+            'layer_info':infos,'resize_policy':RESIZE_POLICY,
+            'source_transform':{'canvas':[sw,sh],'scale':scale,'x':dx,'y':dy}}
+    constrain_critical(layout,infos,cfg['safe'],margin=24)
+    return layout
+
+
+def constrain_critical(layout,infos,safe,margin=4):
+    l,t,r,b=safe
+    for tr in layout['layers']:
+        info=next(i for i in infos if i['id']==tr['id'])
+        if not info['critical']:continue
+        iw,ih=info['box'][2]-info['box'][0],info['box'][3]-info['box'][1]
+        old_scale=tr['scale'];cx=tr['x']+iw*old_scale/2;cy=tr['y']+ih*old_scale/2
+        tr['scale']=min(old_scale,(r-l-2*margin)/iw,(b-t-2*margin)/ih)
+        nw,nh=max(1,round(iw*tr['scale'])),max(1,round(ih*tr['scale']))
+        tr['x']=max(l+margin,min(round(cx-nw/2),r-margin-nw))
+        tr['y']=max(t+margin,min(round(cy-nh/2),b-margin-nh))
 
 
 def render_psd(directory,layout):
@@ -201,14 +240,8 @@ def normalize_ai_layout(directory,proposal,key):
     if not isinstance(proposal,dict):raise ValueError('AI 构图数据无效。')
     candidate={'size':key,'layers':proposal.get('layers'),'background':proposal.get('background',baseline['background'])}
     validate_layout(candidate,ids)
-    l,t,r,b=SIZES[key]['safe']
-    for tr in candidate['layers']:
-        info=next(i for i in infos if i['id']==tr['id'])
-        if info['critical']:
-            iw,ih=info['box'][2]-info['box'][0],info['box'][3]-info['box'][1]
-            tr['scale']=min(tr['scale'],(r-l-8)/iw,(b-t-8)/ih)
-            nw,nh=max(1,round(iw*tr['scale'])),max(1,round(ih*tr['scale']))
-            tr['x']=max(l+4,min(round(tr['x']),r-4-nw));tr['y']=max(t+4,min(round(tr['y']),b-4-nh))
+    constrain_critical(candidate,infos,SIZES[key]['safe'])
     candidate['layer_info']=infos
+    candidate['resize_policy']=RESIZE_POLICY
     render_psd(directory,candidate)
     return candidate

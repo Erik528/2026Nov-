@@ -17,7 +17,7 @@ import numpy as np
 
 from .imaging import SIZES, read_upload, work_image, region_masks, extract, default_layout, render, write_psd
 from .provider import OpenAIImages, ProviderError, settings
-from .psd_import import PSD_MAX_BYTES,import_psd,catalog,set_roles,normalize_ai_layout
+from .psd_import import PSD_MAX_BYTES,RESIZE_POLICY,import_psd,catalog,set_roles,normalize_ai_layout
 
 ROOT=Path(__file__).resolve().parent
 DATA=Path(os.getenv('AD_DATA_DIR',str(ROOT.parent/'data'))).resolve()
@@ -45,6 +45,18 @@ def update(path,**values):
         state=read(path); state.update(values)
         tmp=path/'job.tmp'; tmp.write_text(json.dumps(state,ensure_ascii=False,indent=2)); tmp.replace(path/'job.json')
         return state
+
+
+def ready_state(path):
+    """Existing PSD imports also become directly usable after an update."""
+    result=read(path)
+    if result.get('source_type')=='psd':
+        with LOCK:
+            data=catalog(path)
+            if not result.get('confirmed') or result.get('psd_layers')!=data['layers'] or result.get('resize_policy')!=RESIZE_POLICY:
+                quality={**result.get('quality',{}),'warnings':data.get('warnings',[])}
+                result=update(path,confirmed=True,psd_layers=data['layers'],quality=quality,resize_policy=RESIZE_POLICY,stage='PSD 已读取，可直接选择画幅 resize 并下载')
+    return result
 
 
 def run(job):
@@ -112,9 +124,9 @@ async def upload(file:UploadFile):
         name=re.sub(r'[^\w\-.\u4e00-\u9fff]','_',Path(file.filename or 'design').stem)[:80] or 'design'
         state={'id':job,'filename':file.filename,'name':name,'source_type':'psd',
                'width':data['canvas'][0],'height':data['canvas'][1],'work_width':data['canvas'][0],'work_height':data['canvas'][1],
-               'status':'review','stage':'PSD 图层已读取，待确认图层角色','progress':100,'confirmed':False,
+               'status':'review','stage':'PSD 已读取，可直接选择画幅 resize 并下载','progress':100,'confirmed':True,
                'assets':[i['file'] for i in data['layers']]+['psd-layers.json','source.psd'],
-               'psd_layers':data['layers'],'quality':quality}
+               'psd_layers':data['layers'],'quality':quality,'resize_policy':RESIZE_POLICY}
         (path/'job.json').write_text(json.dumps(state,ensure_ascii=False,indent=2))
         return state
     try: source=read_upload(raw)
@@ -130,7 +142,7 @@ async def upload(file:UploadFile):
 
 @app.get('/api/jobs/{job}')
 def state(job:str):
-    path=folder(job); result=read(path)
+    path=folder(job); result=ready_state(path)
     with LOCK:
         if result['status']=='processing' and job not in ACTIVE:
             result=update(path,status='error',stage='服务重启中断了任务',error='可点击继续处理，复用已保存结果。')
@@ -168,10 +180,15 @@ def confirm(job:str):
 @app.get('/api/jobs/{job}/layout/{key}')
 def get_layout(job:str,key:str,reset:bool=False):
     path=folder(job)
-    if not read(path).get('confirmed'): raise HTTPException(409,'请先确认拆分结果。')
+    state=ready_state(path)
+    if not state.get('confirmed'): raise HTTPException(409,'请先确认拆分结果。')
     if key not in SIZES: raise HTTPException(400,'未知尺寸')
     saved=path/f'layout-{key}.json'
-    return json.loads(saved.read_text()) if saved.exists() and not reset else default_layout(path,key)
+    if saved.exists() and not reset:
+        old=json.loads(saved.read_text())
+        if state.get('source_type')!='psd' or old.get('resize_policy')==RESIZE_POLICY:return old
+    try:return default_layout(path,key)
+    except ValueError as e:raise HTTPException(400,str(e))
 
 
 @app.post('/api/jobs/{job}/psd-roles')
@@ -185,18 +202,18 @@ def psd_roles(job:str,body:dict):
         for pattern in ['layout-*.json','ai-layout-*.json','preview-*.png','validation-*.json','*.psd']:
             for item in path.glob(pattern):
                 if item.name!='source.psd':item.unlink()
-        return update(path,psd_layers=data['layers'],confirmed=False,stage='PSD 图层角色已更新，请确认')
+        return update(path,psd_layers=data['layers'],confirmed=True,stage='PSD 图层角色已更新，可直接选择画幅')
 
 
 @app.post('/api/jobs/{job}/ai-layout/{key}')
 def ai_layout(job:str,key:str):
     path=folder(job)
-    if read(path).get('source_type')!='psd' or not read(path).get('confirmed'):raise HTTPException(409,'请先确认 PSD 图层角色。')
+    if ready_state(path).get('source_type')!='psd':raise HTTPException(409,'请先上传 PSD。')
     if key not in SIZES:raise HTTPException(400,'未知尺寸。')
     with LOCK:
         if job in ACTIVE:raise HTTPException(409,'任务正在处理。')
         saved=path/f'ai-layout-{key}.json'
-        if saved.exists():
+        if saved.exists() and json.loads(saved.read_text()).get('resize_policy')==RESIZE_POLICY:
             (path/f'layout-{key}.json').write_text(saved.read_text())
             return json.loads(saved.read_text())
         ACTIVE.add(job)
@@ -216,14 +233,19 @@ def ai_layout(job:str,key:str):
 
 def save_render(job,layout):
     path=folder(job)
-    if not read(path).get('confirmed'): raise HTTPException(409,'请先确认拆分结果。')
+    state=ready_state(path)
+    if not state.get('confirmed'): raise HTTPException(409,'请先确认拆分结果。')
     with LOCK:
         if job in ACTIVE: raise HTTPException(409,'正在处理，不能调整或导出。')
         try: composite,placed,report=render(path,layout)
         except (ValueError,KeyError,TypeError) as e: raise HTTPException(400,str(e))
         key=layout['size']
         composite.save(path/f'preview-{key}.png')
-        (path/f'layout-{key}.json').write_text(json.dumps(layout,indent=2))
+        saved=path/f'layout-{key}.json'
+        if state.get('source_type')=='psd' and saved.exists() and json.loads(saved.read_text()).get('resize_policy')!=RESIZE_POLICY:
+            backup=path/f'layout-{key}.before-resize-v2.json'
+            if not backup.exists():shutil.copyfile(saved,backup)
+        saved.write_text(json.dumps(layout,indent=2))
     return path,composite,placed,report
 
 

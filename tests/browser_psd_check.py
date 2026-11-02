@@ -20,30 +20,29 @@ with sync_playwright() as p:
  assert page.locator('#psdLayerRoles select').count()==5
  assert page.locator('#assets .asset').count()==5
  assert page.locator('#process').is_disabled()
- assert page.locator('.size:disabled').count()==4
+ assert page.locator('.size:not(:disabled)').count()==4
  assert page.locator('#dimensions').inner_text().endswith('5 个 PSD 图层/组')
  page.screenshot(path=str(OUT/'psd-import.png'),full_page=True)
- page.click('#confirm');page.wait_for_function("document.querySelector('#export').disabled===false")
+ with page.expect_download() as initial:page.click('[data-key="1080x1080"]')
+ initial.value.delete();page.wait_for_function("document.querySelector('#export').disabled===false")
  assert page.locator('#layer option').count()==4
  assert '人物组' in page.locator('#layer').inner_text()
  for key in ['1080x1080','1080x1350','1080x1920','1200x628']:
-  page.click(f'[data-key="{key}"]')
+  with page.expect_download() as download:page.click(f'[data-key="{key}"]')
   page.wait_for_function('(key)=>document.querySelector("#canvasTitle").textContent.startsWith(key.replace("x"," × "))',arg=key)
   page.wait_for_function("document.querySelector('#export').disabled===false")
-  page.click('#export');page.wait_for_selector(f'#downloads a[href$="{key}.psd"]',timeout=60000)
-  with page.expect_download() as download:page.locator('#downloads a').first.click()
+  page.wait_for_selector(f'#downloads a[href$="{key}.psd"]',timeout=60000)
   file=OUT/f'psd-browser-{key}.psd';download.value.save_as(str(file))
   with Image.open(file) as image:assert image.size==tuple(map(int,key.split('x')))
- page.locator('#layer').select_option(label='人物组')
+ page.locator('#layer').select_option(label='Logo')
  page.locator('#x').fill('-400');page.locator('#x').dispatch_event('input')
  page.wait_for_function("document.querySelector('#safeReport').classList.contains('danger')")
- assert '人物组' in page.locator('#safeReport').inner_text()
+ assert 'Logo' in page.locator('#safeReport').inner_text()
  assert page.locator('#export').is_disabled()
  page.click('#reset');page.wait_for_function("document.querySelector('#export').disabled===false")
  page.locator('#psdLayerRoles select').nth(2).select_option('decoration')
- page.click('#applyRoles');page.wait_for_function("document.querySelector('#editor').hidden===true")
- assert page.locator('.size:disabled').count()==4
- page.click('#confirm');page.wait_for_function("document.querySelector('#export').disabled===false")
+ page.click('#applyRoles');page.wait_for_function("document.querySelector('#export').disabled===false")
+ assert page.locator('.size:not(:disabled)').count()==4
  page.locator('#layer').select_option(label='Logo')
  before=page.locator('#x').input_value()
  page.locator('#canvas').scroll_into_view_if_needed()

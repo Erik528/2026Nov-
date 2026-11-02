@@ -124,3 +124,18 @@ def test_local_http_preview_export_workflow(layers,tmp_path,monkeypatch):
 
 def test_safety_configuration_is_exact():
     assert [s['safe'] for s in SIZES.values()]==[[100,100,980,980],[0,250,1080,1100],[65,268,1015,1255],[120,60,1080,570]]
+
+
+def test_jpg_checks_logo_regions_not_whole_image_layer(layers):
+    layout=default_layout(layers,'1080x1080')
+    graphics=next(t for t in layout['layers'] if t['id']=='graphics')
+    graphics['x']=-100
+    # Identified logo is at the right of the merged image layer. The photograph
+    # can bleed while that logo remains safely in-frame.
+    (layers/'elements.json').write_text(json.dumps([{'category':'graphics','role':'logo','label':'Test Logo',
+        'box':[520/640,160/480,550/640,200/480]}]))
+    report=render(layers,layout)[2]
+    assert report['logo_regions_checked']==1 and not report['warnings']
+    assert next(b for b in report['bounds'] if b['id']=='graphics')['outside']
+    graphics['x']=-500
+    assert any('Test Logo' in w for w in render(layers,layout)[2]['warnings'])

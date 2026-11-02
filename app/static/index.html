@@ -17,8 +17,8 @@
 <div class="row"><button id="resume" hidden>继续处理（复用缓存）</button><button id="retry" hidden>重新拆分</button></div>
 <p class="footnote">JPG 拆分与扩图会调用付费 API；PSD 读取、手动 resize 与导出在本地完成。可选 AI 构图会调用 API。</p>
 </section>
-<section class="panel"><div class="panel-title"><h2>输出画幅</h2><span>02 / FORMAT</span></div><div id="sizes" class="sizes"></div><p class="footnote">确认 JPG 拆分结果或 PSD 图层角色后选择画幅。PSD 背景默认裁切适配，不自动补全。</p></section>
-<section class="panel" id="psdLayersPanel" hidden><div class="panel-title"><h2>PSD 图层角色</h2><span>PSD / SOURCE LAYERS</span></div><div id="psdLayerRoles"></div><button id="applyRoles" class="full">保存图层角色</button><p class="footnote">顶层图层/组独立移动；文字与主体受安全区约束，装饰可出血。PSD 直接 resize 不需要 API。</p></section>
+<section class="panel"><div class="panel-title"><h2>输出画幅</h2><span>02 / FORMAT</span></div><div id="sizes" class="sizes"></div><p class="footnote">PSD 读取后点击画幅，自动 resize 并下载 PSD；JPG 仍先审核拆分结果。仅文字与 Logo 限制在安全区内。</p></section>
+<section class="panel" id="psdLayersPanel" hidden><div class="panel-title"><h2>PSD 图层角色</h2><span>PSD / SOURCE LAYERS</span></div><div id="psdLayerRoles"></div><button id="applyRoles" class="full">保存图层角色</button><p class="footnote">顶层图层/组独立移动；只有文字与 Logo 受安全区约束。照片、白色渐变及装饰可出血。角色可随时修正，无需额外确认。</p></section>
 <section class="panel" id="controls" hidden><div class="panel-title"><h2>图层调整</h2><span>03 / LAYERS</span></div>
 <label class="field">当前图层<select id="layer"><option value="text">文字 · 栅格层</option><option value="graphics">图案 · Logo 与主体</option></select></label>
 <div class="input-pair"><label class="field">X / px<input type="number" id="x" step="1"></label><label class="field">Y / px<input type="number" id="y" step="1"></label></div>
