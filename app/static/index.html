@@ -10,35 +10,36 @@
 <div class="workspace">
 <aside>
 <section class="panel"><div class="panel-title"><h2>原始创意</h2><span>01 / SOURCE</span></div>
-<label class="upload" id="dropzone"><input type="file" id="file" accept="image/jpeg,.jpg,.jpeg" hidden><span class="upload-icon">↑</span><strong>选择或拖入 JPG 广告图</strong><small>短边 ≥ 256 px · 最大 20 MB / 2400 万像素</small></label>
+<label class="upload" id="dropzone"><input type="file" id="file" accept="image/jpeg,.jpg,.jpeg,.psd,image/vnd.adobe.photoshop" hidden><span class="upload-icon">↑</span><strong>选择或拖入 JPG / PSD</strong><small>JPG ≤ 20 MB · PSD ≤ 100 MB · RGB / 8 位</small></label>
 <div id="sourceInfo" hidden><img id="source" alt="原始广告图"><strong id="filename"></strong><p id="dimensions" class="muted"></p></div>
 <button id="process" class="primary" disabled>拆分并扩图 <span>↗</span></button>
 <div id="status" class="status" aria-live="polite">上传一张成品广告，开始重构。</div><progress id="progress" value="0" max="100" hidden></progress>
 <div class="row"><button id="resume" hidden>继续处理（复用缓存）</button><button id="retry" hidden>重新拆分</button></div>
-<p class="footnote">拆分与扩图会调用付费 API。已完成的步骤自动保留；重新拆分会清除当前结果并再次调用。</p>
+<p class="footnote">JPG 拆分与扩图会调用付费 API；PSD 读取、手动 resize 与导出在本地完成。可选 AI 构图会调用 API。</p>
 </section>
-<section class="panel"><div class="panel-title"><h2>输出画幅</h2><span>02 / FORMAT</span></div><div id="sizes" class="sizes"></div><p class="footnote">审核并确认拆分结果后，选择画幅。四种画幅共用同一张扩展底图。</p></section>
+<section class="panel"><div class="panel-title"><h2>输出画幅</h2><span>02 / FORMAT</span></div><div id="sizes" class="sizes"></div><p class="footnote">确认 JPG 拆分结果或 PSD 图层角色后选择画幅。PSD 背景默认裁切适配，不自动补全。</p></section>
+<section class="panel" id="psdLayersPanel" hidden><div class="panel-title"><h2>PSD 图层角色</h2><span>PSD / SOURCE LAYERS</span></div><div id="psdLayerRoles"></div><button id="applyRoles" class="full">保存图层角色</button><p class="footnote">顶层图层/组独立移动；文字与主体受安全区约束，装饰可出血。PSD 直接 resize 不需要 API。</p></section>
 <section class="panel" id="controls" hidden><div class="panel-title"><h2>图层调整</h2><span>03 / LAYERS</span></div>
 <label class="field">当前图层<select id="layer"><option value="text">文字 · 栅格层</option><option value="graphics">图案 · Logo 与主体</option></select></label>
 <div class="input-pair"><label class="field">X / px<input type="number" id="x" step="1"></label><label class="field">Y / px<input type="number" id="y" step="1"></label></div>
 <label class="field">缩放 / %<input type="number" id="scale" min="1" max="1000" step="1"></label>
-<p class="footnote">可直接在预览中拖动当前图层。文字与图案分别为合并栅格层。</p>
+<p class="footnote" id="layerHelp">可直接在预览中拖动当前图层。JPG 使用两个合并前景层；PSD 保留多个独立渲染层。</p>
 <div class="divider"></div><h3>背景裁切</h3>
 <label class="field range">水平<input type="range" id="bgx" min="0" max="1" step="0.01" value="0.5"></label>
 <label class="field range">垂直<input type="range" id="bgy" min="0" max="1" step="0.01" value="0.5"></label>
 <label class="field range">放大<input type="range" id="bgzoom" min="1" max="3" step="0.01" value="1"></label>
-<button id="reset" class="full">恢复自动构图</button>
+<button id="reset" class="full">恢复自动构图</button><button id="aiLayout" class="full" hidden>AI 建议构图（可选 API）</button><p id="aiHelp" class="footnote" hidden>模型读取 PSD 图层名称、位置、角色及预览，提出排版建议。每个尺寸缓存一次；坐标与安全区由程序复核。</p>
 </section>
 </aside>
 <div class="content">
 <section class="panel preview-panel"><div class="preview-top"><div><p class="eyebrow">CREATIVE CANVAS</p><h2 id="canvasTitle">你的下一张广告，从这里开始</h2></div><label id="safeToggleWrap" hidden><input type="checkbox" id="safeToggle" checked> 安全区遮罩</label></div>
 <div id="empty" class="empty"><div class="frames"><span></span><span></span><span></span></div><h3>一次拆分，四种可能</h3><p>上传设计，审核独立素材，再为每个版位调整构图。</p><div class="format-labels">1:1 <b>·</b> 4:5 <b>·</b> 9:16 <b>·</b> 1.91:1</div></div>
-<div id="review" hidden><p class="review-note">对照原图检查拼写、Logo、边缘与背景残留。此结果尚未经过人工确认。</p><div class="comparison"><figure><img id="reviewOriginal" alt="原图"><figcaption>原始广告</figcaption></figure><figure><img id="reconstruction" alt="拆分后重叠合成"><figcaption>拆分后重叠合成</figcaption></figure></div><ul id="quality" class="warnings"></ul><button class="primary" id="confirm">我已检查素材，进入构图 →</button></div>
+<div id="review" hidden><p class="review-note" id="reviewNote">对照原图检查拼写、Logo、边缘与背景残留。此结果尚未经过人工确认。</p><div class="comparison"><figure><img id="reviewOriginal" alt="原图"><figcaption>原始广告</figcaption></figure><figure><img id="reconstruction" alt="拆分后重叠合成"><figcaption id="compositeCaption">拆分后重叠合成</figcaption></figure></div><ul id="quality" class="warnings"></ul><button class="primary" id="confirm">我已检查素材，进入构图 →</button></div>
 <div id="editor" hidden><div class="canvas-stage"><canvas id="canvas" aria-label="可拖拽调整广告图层的画布"></canvas></div><div id="safeReport" role="status"></div></div>
 <div class="preview-bottom"><span id="previewLabel">所有坐标与安全区由程序统一计算</span><span>RGB / 8 BIT</span></div>
 </section>
-<section class="panel" id="assetsPanel" hidden><div class="panel-title"><h2>拆分素材</h2><span>INTERMEDIATE ASSETS</span></div><div id="assets" class="assets"></div></section>
-<section class="panel export-panel"><div><h2>把创意带回 Photoshop</h2><p class="muted">背景 / 图案 / 文字 · 三个独立图层。文字保留原始像素，不是可编辑文字层。</p></div><button id="export" class="primary" disabled>导出 PSD ↓</button><div id="downloads"></div></section>
+<section class="panel" id="assetsPanel" hidden><div class="panel-title"><h2 id="assetsTitle">拆分素材</h2><span>INTERMEDIATE ASSETS</span></div><div id="assets" class="assets"></div></section>
+<section class="panel export-panel"><div><h2>把创意带回 Photoshop</h2><p class="muted">JPG 导出背景 / 图案 / 文字；PSD 保留多个独立渲染层。导出文字为栅格层。</p></div><button id="export" class="primary" disabled>导出 PSD ↓</button><div id="downloads"></div></section>
 </div>
 </div>
 <footer><span>AD ATELIER — DESIGNED TO ADAPT.</span><span>安全区是排版约束 · 拆分质量需要人工审核</span></footer>

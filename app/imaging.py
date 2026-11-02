@@ -94,6 +94,9 @@ def extract(source, clean, elements):
 
 
 def default_layout(directory, key):
+    if (directory/'psd-layers.json').exists():
+        from .psd_import import default_psd_layout
+        return default_psd_layout(directory,key)
     cfg = SIZES[key]
     w,h = cfg['width'],cfg['height']
     l,t,r,b = cfg['safe']
@@ -108,7 +111,7 @@ def default_layout(directory, key):
     union = [min(x[0] for x in boxes.values()), min(x[1] for x in boxes.values()),
              max(x[2] for x in boxes.values()),max(x[3] for x in boxes.values())]
     uw,uh = union[2]-union[0],union[3]-union[1]
-    scale = min((r-l-2*margin)/uw,(b-t-2*margin)/uh)
+    scale = min(10,(r-l-2*margin)/uw,(b-t-2*margin)/uh)
     # Preserve the source hierarchy and relative spacing, anchored in the safe zone.
     x0 = l+margin+(r-l-2*margin-uw*scale)/2
     y0 = t+margin+(b-t-2*margin-uh*scale)/2
@@ -119,12 +122,13 @@ def default_layout(directory, key):
     return {'size':key,'layers':layers,'background':{'x':.5,'y':.5,'zoom':1}}
 
 
-def validate_layout(layout):
+def validate_layout(layout,expected_ids=None):
     key=layout.get('size')
     if key not in SIZES: raise ValueError('未知目标尺寸。')
-    if not isinstance(layout.get('layers'),list) or len(layout['layers']) != 2:
-        raise ValueError('必须包含文字与图案两层。')
-    if not all(isinstance(x,dict) for x in layout['layers']) or {x.get('id') for x in layout['layers']} != {'text','graphics'}:
+    expected_ids=expected_ids if expected_ids is not None else ['text','graphics']
+    if not isinstance(layout.get('layers'),list) or len(layout['layers']) != len(expected_ids):
+        raise ValueError('构图必须包含全部可移动图层。')
+    if not all(isinstance(x,dict) and isinstance(x.get('id'),str) for x in layout['layers']) or {x.get('id') for x in layout['layers']} != set(expected_ids):
         raise ValueError('图层名称无效。')
     for layer in layout['layers']:
         for k in ['x','y','scale']:
@@ -141,6 +145,9 @@ def validate_layout(layout):
 
 
 def render(directory, layout):
+    if (directory/'psd-layers.json').exists():
+        from .psd_import import render_psd
+        return render_psd(directory,layout)
     validate_layout(layout)
     cfg=SIZES[layout['size']]; size=(cfg['width'],cfg['height'])
     with Image.open(directory/'expanded.png') as img:
@@ -175,12 +182,14 @@ def render(directory, layout):
 def write_psd(path, size, placed, preview):
     psd=PSDImage.new('RGBA',size,color=(255,255,255,255))
     for name,img,x,y in placed:
-        psd.append(PixelLayer.frompil(img,psd,layer_name=name,left=x,top=y))
+        layer=PixelLayer.frompil(img,psd,layer_name=name,left=x,top=y)
+        layer.name=name
+        psd.append(layer)
     psd.save(path)
     check=PSDImage.open(path)
-    if check.size!=size or len(check)!=3:
+    if check.size!=size or len(check)!=len(placed):
         raise ValueError('PSD 画布尺寸或图层数量验证失败。')
-    expected=['Background','Graphics','Text (raster)']
+    expected=[p[0] for p in placed]
     if [x.name for x in check]!=expected:
         raise ValueError('PSD 图层顺序验证失败。')
     for layer,(_,img,x,y) in zip(check,placed):

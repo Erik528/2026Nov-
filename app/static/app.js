@@ -9,14 +9,16 @@ async function api(url,options={}){
  if(!r.ok)throw Error(typeof data.detail==='string'?data.detail:JSON.stringify(data.detail));return data;
 }
 function post(url,data){return api(url,{method:'POST',headers:{'Content-Type':'application/json'},...(data?{body:JSON.stringify(data)}:{})});}
+function isPSD(){return job?.source_type==='psd';}
+function infoLayers(){return layout?.layer_info||[{id:'graphics',name:'图案 · Logo 与主体',file:'graphics.png'},{id:'text',name:'文字 · 栅格层',file:'text.png'}];}
 function asset(name){return `/api/jobs/${job.id}/assets/${name}`;}
 function image(url){return new Promise((resolve,reject)=>{const im=new Image();im.onload=()=>resolve(im);im.onerror=()=>reject(Error('无法加载图像素材'));im.src=url;});}
 function steps(n){[1,2,3].forEach(i=>$(`step${i}`).classList.toggle('active',i===n));}
 function sizeEnabled(on){document.querySelectorAll('.size').forEach(b=>b.disabled=!on);}
-function setBusy(on){busy=on;sizeEnabled(!on&&!!job?.confirmed);for(const id of ['x','y','scale','bgx','bgy','bgzoom','layer','reset'])$(id).disabled=on;$('file').disabled=on;$('process').disabled=on||!job;$('resume').disabled=on;$('retry').disabled=on;}
+function setBusy(on){busy=on;if(on)$('export').disabled=true;sizeEnabled(!on&&!!job?.confirmed);for(const id of ['x','y','scale','bgx','bgy','bgzoom','layer','reset','aiLayout','applyRoles'])$(id).disabled=on;$('file').disabled=on;$('process').disabled=on||!job||isPSD();$('aiLayout').disabled=on||!cfg?.api_configured;$('resume').disabled=on;$('retry').disabled=on;}
 function syncJob(){
  $('status').textContent=job.stage+(job.error?'：'+job.error:'');$('progress').value=job.progress;
- show('progress',job.status==='processing');show('retry',job.status==='review'||job.status==='error');show('resume',job.status==='error');
+ show('progress',job.status==='processing');show('retry',!isPSD()&&(job.status==='review'||job.status==='error'));show('resume',!isPSD()&&job.status==='error');$('process').innerHTML=isPSD()?'PSD 已读取 · 无需拆分':'拆分并扩图 <span>↗</span>';
  setBusy(job.status==='processing');
  if(job.status==='error')notice(job.error,true);
 }
@@ -29,11 +31,11 @@ async function upload(file){
   job=await api('/api/jobs',{method:'POST',body:form});
   localStorage.setItem('ad-atelier-job',job.id);
   layout=null;report=null;images={};previewVersion++;clearTimeout(renderTimer);
-  ['review','editor','assetsPanel','controls','safeToggleWrap'].forEach(id=>show(id,false));show('empty');
+  ['review','editor','assetsPanel','controls','safeToggleWrap','psdLayersPanel'].forEach(id=>show(id,false));show('empty');
   $('export').disabled=true;$('downloads').replaceChildren();sizeEnabled(false);steps(1);
   $('source').src=asset('original.png');$('filename').textContent=job.filename;
-  $('dimensions').textContent=`${job.width} × ${job.height} px · EXIF 方向已校正`;
-  show('sourceInfo');notice('原图已就绪。点击“拆分并扩图”开始真实 API 处理。');syncJob();
+  $('dimensions').textContent=`${job.width} × ${job.height} px · ${isPSD()?job.psd_layers.length+' 个 PSD 图层/组':'EXIF 方向已校正'}`;
+  show('sourceInfo');notice('原图已就绪。点击“拆分并扩图”开始真实 API 处理。');syncJob();if(isPSD())await review();
  }catch(e){notice(e.message,true);setBusy(false);}
 }
 $('file').onchange=e=>upload(e.target.files[0]);
@@ -46,7 +48,7 @@ async function process(fresh=false){
  try{
   job=await post(`/api/jobs/${job.id}/process?fresh=${fresh}`);
   layout=null;report=null;images={};previewVersion++;clearTimeout(renderTimer);
-  ['review','editor','assetsPanel','controls','safeToggleWrap'].forEach(id=>show(id,false));show('empty');sizeEnabled(false);$('export').disabled=true;$('downloads').replaceChildren();steps(1);
+  ['review','editor','assetsPanel','controls','safeToggleWrap','psdLayersPanel'].forEach(id=>show(id,false));show('empty');sizeEnabled(false);$('export').disabled=true;$('downloads').replaceChildren();steps(1);
   notice('正在执行真实图像处理。可以保留此页面等待；刷新后也可恢复任务。');syncJob();poll();
  }catch(e){notice(e.message,true);}
 }
@@ -61,22 +63,23 @@ async function poll(){
  }catch(e){notice(e.message+' 可刷新页面恢复任务。',true);setBusy(false);}finally{polling=false;}
 }
 async function review(){
- syncJob();steps(2);show('empty',false);show('review');show('assetsPanel');
+ syncJob();steps(2);show('empty',false);show('review');show('assetsPanel');$('canvasTitle').textContent=isPSD()?'审核 PSD 图层与合成':'审核拆分素材';$('assetsTitle').textContent=isPSD()?'PSD 独立图层素材':'拆分素材';$('compositeCaption').textContent=isPSD()?'导入后重叠合成':'拆分后重叠合成';$('reviewNote').textContent=isPSD()?'对照原 PSD 检查图层外观，并确认背景、文字、主体和装饰角色。':'对照原图检查拼写、Logo、边缘与背景残留。此结果尚未经过人工确认。';
  const cache=`?v=${Date.now()}`;
  $('reviewOriginal').src=asset('work.png')+cache;$('reconstruction').src=asset('reconstructed.png')+cache;
  $('quality').replaceChildren();
  for(const warning of job.quality?.warnings||[]){const li=document.createElement('li');li.textContent=warning;$('quality').append(li);}
  const li=document.createElement('li');li.textContent=`原图重建平均像素误差：${job.quality?.reconstruction_mae??'—'} / 255（数值低不保证拆分正确）。`;$('quality').append(li);
  $('assets').replaceChildren();
- for(const [name,title,desc] of [['text.png','文字透明层','原始字形与颜色 · 栅格'],['graphics.png','图案透明层','Logo / 产品 / 人物'],['clean.png','干净底图','移除前景后的补全结果'],['expanded.png','四周扩展底图','宽、高各 2 倍 · 所有尺寸共用']]){
+ const assetRows=isPSD()?job.psd_layers.map(i=>[i.file,i.name,'PSD '+i.source.kind+' · 独立渲染层']):[['text.png','文字透明层','原始字形与颜色 · 栅格'],['graphics.png','图案透明层','Logo / 产品 / 人物'],['clean.png','干净底图','移除前景后的补全结果'],['expanded.png','四周扩展底图','宽、高各 2 倍 · 所有尺寸共用']];
+ for(const [name,title,desc] of assetRows){
   const card=document.createElement('div');card.className='asset';const im=document.createElement('img');im.src=asset(name)+cache;im.alt=title;
   const a=document.createElement('a');a.href=asset(name);a.download=name;a.textContent=title+' ↓';
   const small=document.createElement('small');small.textContent=desc;card.append(im,a,small);$('assets').append(card);
  }
- notice('拆分完成，等待你审核。可下载素材放大检查；发现明显残留或破损时请重新处理。');
+ notice(isPSD()?'PSD 分层已读取，无需 AI 拆图。确认图层角色后可直接选择尺寸；背景采用裁切适配。':'拆分完成，等待你审核。可下载素材放大检查；发现明显残留或破损时请重新处理。');renderRoles();
  if(job.confirmed){sizeEnabled(true);notice('已恢复已确认的拆分结果，可选择尺寸继续构图。');}
 }
-$('confirm').onclick=async()=>{try{job=await post(`/api/jobs/${job.id}/confirm`);sizeEnabled(true);await choose('1080x1080');}catch(e){notice(e.message,true);}};
+$('confirm').onclick=async()=>{try{if(isPSD()){const layers=[...$('psdLayerRoles').querySelectorAll('select')].map(s=>({id:s.dataset.layerId,category:s.value}));if(layers.some(r=>job.psd_layers.find(i=>i.id===r.id).category!==r.category))job=await post(`/api/jobs/${job.id}/psd-roles`,{layers});}job=await post(`/api/jobs/${job.id}/confirm`);sizeEnabled(true);await choose('1080x1080');}catch(e){notice(e.message,true);}};
 async function choose(key,reset=false){
  if(busy)return;
  setBusy(true);$('downloads').replaceChildren();report=null;
@@ -84,8 +87,10 @@ async function choose(key,reset=false){
   if(reset){ // Ask server for automatic layout explicitly, preserving saved versions unless reset is chosen.
    layout=await api(`/api/jobs/${job.id}/layout/${key}?reset=true`);
   }else layout=await api(`/api/jobs/${job.id}/layout/${key}`);
-  const loaded=await Promise.all(['expanded','text','graphics'].map(async n=>[n,await image(asset(n+'.png')+`?v=${job.id}`)]));
-  images=Object.fromEntries(loaded);show('review',false);show('empty',false);show('editor');show('controls');show('safeToggleWrap');steps(3);
+  const version=Date.now();const entries=[['expanded','expanded.png'],...infoLayers().map(i=>[i.id,i.file])];
+  const loaded=await Promise.all(entries.map(async([id,file])=>[id,await image(asset(file)+`?v=${version}`)]));
+  images=Object.fromEntries(loaded);$('layer').replaceChildren();for(const i of infoLayers()){const o=document.createElement('option');o.value=i.id;o.textContent=i.name;$('layer').append(o);}
+  show('aiLayout',isPSD());show('aiHelp',isPSD());$('aiLayout').disabled=!cfg.api_configured;show('review',false);show('empty',false);show('editor');show('controls');show('safeToggleWrap');steps(3);
   document.querySelectorAll('.size').forEach(b=>b.classList.toggle('selected',b.dataset.key===key));
   $('canvasTitle').textContent=key.replace('x',' × ')+' px';$('previewLabel').textContent='拖动选中图层 · 粉色为安全区外区域';
   updateFields();await refresh();notice('构图已生成。调整图层或背景裁切后，程序会重新检查安全区。');
@@ -125,8 +130,8 @@ function draw(){
  // drag only that layer is translated visually, with final bounds checked server-side.
  if(images.preview&&report){ctx.drawImage(images.preview,0,0,w,h);}else{
   // Crop alpha extents once per source to match backend source-layer coordinates.
-  for(const name of ['graphics','text']){
-   const im=images[name];if(!im.crop){const c=document.createElement('canvas');c.width=im.width;c.height=im.height;const cx=c.getContext('2d',{willReadFrequently:true});cx.drawImage(im,0,0);const d=cx.getImageData(0,0,c.width,c.height).data;let l=c.width,t=c.height,r=0,b=0;for(let y=0;y<c.height;y++)for(let x=0;x<c.width;x++)if(d[(y*c.width+x)*4+3]){l=Math.min(l,x);t=Math.min(t,y);r=Math.max(r,x+1);b=Math.max(b,y+1);}im.crop=[l,t,r-l,b-t];}
+  for(const info of infoLayers()){
+   const name=info.id,im=images[name];if(!im.crop){const c=document.createElement('canvas');c.width=im.width;c.height=im.height;const cx=c.getContext('2d',{willReadFrequently:true});cx.drawImage(im,0,0);const d=cx.getImageData(0,0,c.width,c.height).data;let l=c.width,t=c.height,r=0,b=0;for(let y=0;y<c.height;y++)for(let x=0;x<c.width;x++)if(d[(y*c.width+x)*4+3]){l=Math.min(l,x);t=Math.min(t,y);r=Math.max(r,x+1);b=Math.max(b,y+1);}im.crop=[l,t,r-l,b-t];}
    const [x,y,cw,ch]=im.crop,tr=layout.layers.find(l=>l.id===name);ctx.drawImage(im,x,y,cw,ch,tr.x,tr.y,Math.round(cw*tr.scale),Math.round(ch*tr.scale));
   }
  }
@@ -139,11 +144,34 @@ $('canvas').onpointerdown=e=>{if(!layout||busy)return;const [x,y]=point(e);point
 $('canvas').onpointermove=e=>{if(!pointer)return;const [x,y]=point(e);selected().x=Math.round(pointer.startX+x-pointer.x);selected().y=Math.round(pointer.startY+y-pointer.y);updateFields();changed();};
 $('canvas').onpointerup=()=>{pointer=null;};$('canvas').onpointercancel=()=>{pointer=null;};
 $('export').onclick=async()=>{
+ if(busy||!layout)return;
  try{setBusy(true);$('export').disabled=true;notice('正在写入并重新读取 PSD，检查图层、透明度与合成…');
   const out=await post(`/api/jobs/${job.id}/export`,structuredClone(layout));$('downloads').replaceChildren();
   for(const [url,label] of [[out.url,'下载分层 PSD ↓'],[out.preview,'下载合成 PNG ↓'],[asset('layout-'+layout.size+'.json'),'下载构图 JSON ↓'],[asset('validation-'+layout.size+'.json'),'PSD 检查报告 ↓']]){const a=document.createElement('a');a.href=url;a.download='';a.textContent=label;$('downloads').append(a);}
-  notice(`PSD 已通过读取验证：${out.validation.canvas.join(' × ')} px，3 个独立图层。请下载后在 Photoshop 中检查。`);
+  notice(`PSD 已通过读取验证：${out.validation.canvas.join(' × ')} px，${out.validation.layers.length} 个独立图层。请下载后在 Photoshop 中检查。`);
  }catch(e){notice(e.message,true);}finally{setBusy(false);$('export').disabled=!report||!!report.warnings.length;}
+};
+function renderRoles(){
+ show('psdLayersPanel',isPSD());if(!isPSD())return;
+ $('psdLayerRoles').replaceChildren();
+ for(const item of job.psd_layers){const row=document.createElement('label');row.className='field';const title=document.createElement('span');title.textContent=item.name+' · '+item.source.kind;
+  const select=document.createElement('select');select.dataset.layerId=item.id;
+  for(const [value,label] of [['background','背景'],['text','文字（关键）'],['graphics','主体 / Logo（关键）'],['decoration','装饰（允许出血）']]){const option=document.createElement('option');option.value=value;option.textContent=label;select.append(option);}select.value=item.category;row.append(title,select);$('psdLayerRoles').append(row);
+ }
+}
+$('applyRoles').onclick=async()=>{
+ if(busy)return;
+ try{setBusy(true);const layers=[...$('psdLayerRoles').querySelectorAll('select')].map(s=>({id:s.dataset.layerId,category:s.value}));
+  job=await post(`/api/jobs/${job.id}/psd-roles`,{layers});layout=null;report=null;images={};previewVersion++;clearTimeout(renderTimer);
+  ['editor','controls','safeToggleWrap'].forEach(i=>show(i,false));$('downloads').replaceChildren();$('export').disabled=true;sizeEnabled(false);await review();
+ }catch(e){notice(e.message,true);}finally{setBusy(false);}
+};
+$('aiLayout').onclick=async()=>{
+ if(busy||!layout)return;const key=layout.size;
+ try{setBusy(true);notice('AI 正在读取 PSD 图层名称、角色、坐标和预览并建议排版…');
+  await post(`/api/jobs/${job.id}/ai-layout/${key}`);setBusy(false);await choose(key);
+  notice('已应用 AI 建议；坐标和安全区已由程序检查，请人工审核层间遮挡、层级与留白。同尺寸再次点击会复用缓存。');
+ }catch(e){notice(e.message,true);}finally{setBusy(false);}
 };
 (async()=>{
  try{
@@ -151,7 +179,7 @@ $('export').onclick=async()=>{
   for(const [key,spec] of Object.entries(cfg.sizes)){
    const b=document.createElement('button');b.className='size';b.dataset.key=key;b.disabled=true;b.innerHTML=`<span class="icon"></span><b>${spec.width} × ${spec.height}</b><small>${{'1080x1080':'FEED · 1:1','1080x1350':'FEED · 4:5','1080x1920':'STORY · 9:16','1200x628':'LANDSCAPE'}[key]}</small>`;b.onclick=()=>choose(key);$('sizes').append(b);
   }
-  if(!cfg.api_configured)notice('API 尚未配置：在环境设置或本机 .env 配置 AD_OPENAI_API_KEY 后重启。上传、构图和 PSD 功能不需要外部服务；拆分与扩图需要。');
+  if(!cfg.api_configured)notice('PSD 上传、分层 resize 与导出可直接使用；JPG 拆分、扩图及可选 AI 构图需要在 .env 配置 API 密钥并重启。');
   const previous=localStorage.getItem('ad-atelier-job');
   if(previous){try{job=await api('/api/jobs/'+previous);$('source').src=asset('original.png');$('filename').textContent=job.filename;$('dimensions').textContent=`${job.width} × ${job.height} px`;show('sourceInfo');syncJob();if(job.status==='processing')poll();else if(job.status==='review')await review();}catch{localStorage.removeItem('ad-atelier-job');job=null;}}
  }catch(e){notice(e.message,true);}
