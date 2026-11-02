@@ -32,13 +32,23 @@ def response_error(response, route, model=None):
         error = {}
     codes = {'insufficient_quota', 'rate_limit_exceeded', 'billing_hard_limit_reached',
              'billing_not_active', 'usage_limit_reached', 'organization_quota_exceeded',
-             'invalid_api_key', 'model_not_found', 'permission_denied'}
+             'invalid_api_key', 'model_not_found', 'permission_denied', 'invalid_value',
+             'invalid_type', 'unsupported_parameter', 'unsupported_value', 'invalid_image',
+             'invalid_image_format', 'invalid_mask', 'content_policy_violation',
+             'moderation_blocked', 'organization_verification_required'}
     types = {'insufficient_quota', 'rate_limit_error', 'invalid_request_error',
-             'billing_error', 'server_error', 'tokens', 'requests'}
+             'billing_error', 'server_error', 'tokens', 'requests',
+             'image_generation_user_error', 'image_edit_user_error'}
     code = error.get('code') if isinstance(error.get('code'), str) and error['code'] in codes else 'unknown'
     kind = error.get('type') if isinstance(error.get('type'), str) and error['type'] in types else 'unknown'
     details = {'http_status':response.status_code, 'code':code, 'type':kind,
                'endpoint':route if route in ['/chat/completions','/images/edits'] else 'unknown'}
+    parameter = error.get('param')
+    if isinstance(parameter,str) and parameter in {'image','image[0]','image[]','mask','model','size','quality','output_format','n','response_format','prompt'}:
+        details['parameter'] = parameter
+    # Classify upstream prose into fixed messages; never expose its raw content.
+    upstream_message = error.get('message')
+    upstream_message = upstream_message.lower() if isinstance(upstream_message,str) else ''
     if isinstance(model, str) and re.fullmatch(r'gpt-[A-Za-z0-9_.:-]{1,60}', model):
         details['model'] = model
     request_id = response.headers.get('x-request-id', '')
@@ -67,11 +77,21 @@ def response_error(response, route, model=None):
         else:
             message = 'HTTP 429：上游未提供可识别的错误代码，暂不能区分额度不足和速率限制。请核对 API 项目 Billing 与模型 Limits。'
             details['category'] = 'unknown_429'
+    elif response.status_code in {400,403,404} and ('organization' in upstream_message or 'organisation' in upstream_message) and 'verif' in upstream_message:
+        details['category'] = 'organization_verification'
+        message = '图像模型要求组织验证。请在 API Platform 的组织 General 设置检查 Verify Organization；验证通过并生效后，再继续处理。'
+    elif response.status_code in {400,404} and parameter == 'model' and (code=='model_not_found' or any(marker in upstream_message for marker in ['does not exist','not found','retired','shut down','deprecated','no longer available'])):
+        details['category'] = 'model_unavailable'
+        message = '配置的图像模型不存在、已停用或对当前项目不可用。gpt-image-1 已于 2026-10-23 停用；请将 .env 的 AD_IMAGE_MODEL 改为 gpt-image-2.5-sunburst，重启服务后继续处理。'
+    elif response.status_code == 400 and (code in {'content_policy_violation','moderation_blocked'} or 'safety' in upstream_message or 'content policy' in upstream_message):
+        details['category'] = 'content_policy'
+        message = '上游图像安全审核拒绝了请求。请检查素材与提示内容；这不是余额不足，程序不会绕过审核或自动重复调用。'
     else:
         message = {401:'API 密钥无效或未授权。',403:'API 权限或网络策略拒绝，请检查模型权限和组织验证。',
                    400:'API 模型或输入不受支持，请检查图像编辑权限与输入参数。'}.get(response.status_code,'API 上游服务错误。')
     message += f' [HTTP {response.status_code}; code={code}; type={kind}]'
     if details.get('model'): message += f' 模型：{details["model"]}。'
+    if details.get('parameter'): message += f' 参数：{details["parameter"]}。'
     if details.get('request_id'): message += f' Request ID：{details["request_id"]}。'
     if limits: message += ' 速率信息：'+', '.join(f'{k}={v}' for k,v in limits.items())+'。'
     return ProviderError(message+' 已保留完成的中间结果；不会自动重复调用。',details)
@@ -81,7 +101,7 @@ def settings():
     return {'key':os.getenv('AD_OPENAI_API_KEY') or os.getenv('OPENAI_API_KEY',''),
             'base':os.getenv('AD_OPENAI_BASE_URL','https://api.openai.com/v1').rstrip('/'),
             'vision':os.getenv('AD_VISION_MODEL','gpt-4.1'),
-            'image':os.getenv('AD_IMAGE_MODEL','gpt-image-1')}
+            'image':os.getenv('AD_IMAGE_MODEL','gpt-image-2.5-sunburst')}
 
 
 def png(im):
@@ -148,10 +168,17 @@ Every detected text, logo and main subject is critical. Max 60 elements.'''
             raise ProviderError('视觉 API 返回的元素坐标不合法。请重新识别。') from e
 
     def edit(self, image, mask, prompt):
+        if self.cfg['image'] == 'gpt-image-1':
+            raise ProviderError('gpt-image-1 已于 2026-10-23 停用。请将 .env 的 AD_IMAGE_MODEL 改为 gpt-image-2.5-sunburst，重启服务后点击“继续处理（复用缓存）”。')
+        if image.size != mask.size or mask.mode != 'RGBA' or mask.getchannel('A').getextrema()[0] != 0:
+            raise ProviderError('本地图像编辑遮罩无效：需与输入图同尺寸的 RGBA PNG，并包含完全透明的待编辑区域。')
+        image_bytes,mask_bytes=png(image),png(mask)
+        if len(mask_bytes)>=4*1024*1024:
+            raise ProviderError('本地图像编辑遮罩超过 API 的 4 MB 限制。')
         result=self.request('/images/edits',data={'model':self.cfg['image'],
             'prompt':prompt,'size':'1024x1024','n':'1','quality':'high'},
-            files={'image':('image.png',png(image),'image/png'),
-                   'mask':('mask.png',png(mask),'image/png')})
+            files={'image':('image.png',image_bytes,'image/png'),
+                   'mask':('mask.png',mask_bytes,'image/png')})
         try:
             encoded=result['data'][0]['b64_json']
             output=Image.open(io.BytesIO(base64.b64decode(encoded,validate=True)))

@@ -2,7 +2,7 @@
 
 本地 Web 工具：上传 JPG → OpenAI 识别元素 → API 移除前景、补全背景 → 从原 JPG 像素提取文字和图案 → API 四周扩图 → 人工审核 → 四种尺寸构图与调整 → 真正分层 PSD。
 
-**实现已具备真实 API 调用路径，没有模拟 API 或演示拆分模式。当前云环境缺少 API 密钥，尚未完成真实广告的 API 端到端验收。** 本地测试素材与真实拆分效果严格分开，详见 [VALIDATION.md](VALIDATION.md)。
+**实现已具备真实 API 调用路径，没有模拟 API 或演示拆分模式。当前已实测真实图像编辑 API 的基础请求，尚未完成真实广告的 API 端到端验收。** 本地测试素材与真实拆分效果严格分开，详见 [VALIDATION.md](VALIDATION.md)。
 
 ## 安装与启动
 
@@ -27,7 +27,7 @@ bash scripts/start.sh
 | `AD_OPENAI_API_KEY` | 必需；官方 OpenAI API 密钥；也兼容已有 `OPENAI_API_KEY` |
 | `AD_OPENAI_BASE_URL` | `https://api.openai.com/v1`，必须为 HTTPS |
 | `AD_VISION_MODEL` | `gpt-4.1`，用于 JSON 坐标识别 |
-| `AD_IMAGE_MODEL` | `gpt-image-1`，需具有图像编辑权限，账户可能要求组织验证 |
+| `AD_IMAGE_MODEL` | `gpt-image-2.5-sunburst`，需具有图像编辑权限，账户可能要求组织验证 |
 | `AD_DATA_DIR` | 项目 `data/`；本地保存上传、检查点、构图和导出 |
 
 只需访问 `api.openai.com`（安装依赖另需 PyPI 及其下载域名）。云环境已保存 `AD_OPENAI_API_KEY` secret 需求及此 API 域名；请在环境设置中安全填写值、审核保存并发布。草稿保存不表示密钥已注入或环境已发布。配置变化后重启服务，并重试真实请求确认生效。
@@ -76,7 +76,7 @@ bash scripts/start.sh
 
 ## 已知限制
 
-- **真实 API、真实广告质量与 Photoshop 互操作验收尚未完成**，不能将本地测试通过等同于产品已满足全部验收标准。
+- **真实广告端到端质量与 Photoshop 互操作验收尚未完成**，不能将本地测试通过等同于产品已满足全部验收标准。
 - 文字/图案各为一个合并可移动层；会保存对象坐标，但未提供可靠的逐对象拆层。文字与人物交叠、复杂阴影、发丝、半透明玻璃等可能需要手工修图。
 - 遮挡后的图案像素无法从单张 JPG 恢复；本版只补全背景。Logo 或产品边缘也可能随近似遮罩受损。
 - 重建平均误差与背景变化比例只能辅助审核；不能自动判断文字残留、拼写、Logo 完整性或补全是否自然。质量存疑时不要确认，重新处理或下载 PNG 手动修正。
@@ -105,3 +105,18 @@ python scripts/check_api.py --probe
 第一条只检查本地配置，第二条向当前视觉模型发送一次极小的真实文字请求（可能产生少量 API 费用），不上传图片、不调用图像编辑。输出仅含配置是否存在、模型、API 主机与脱敏诊断。小请求成功不表示大图片请求或图像模型一定未超限。
 
 `AD_OPENAI_API_KEY` 优先于 `OPENAI_API_KEY`；已有进程环境变量优先于 `.env`。请检查是否实际使用了预期项目的密钥，修改配置后重启 PowerShell 中的服务。成功步骤已缓存，重试使用“继续处理（复用缓存）”，不要为排查 429 点击“重新拆分”。
+
+
+## 2026-11-02：图像模型停用迁移
+
+OpenAI [官方图像编辑参数文档（客户端源码）](https://github.com/openai/openai-python/blob/main/src/openai/types/image_edit_params.py)注明 `gpt-image-1` 已于 2026-10-23 停用，建议改用 `gpt-image-2.5-sunburst` 或 `gpt-image-2.5-flare`。本项目默认值已更新为前者。旧 `.env` 的显式设置会覆盖代码默认值，**已有安装必须自行更新 `.env`**：
+
+```env
+AD_IMAGE_MODEL=gpt-image-2.5-sunburst
+```
+
+在启动服务的 PowerShell 按 Ctrl+C 停止服务，再按原命令启动，然后点击“继续处理（复用缓存）”。不修改视觉模型，不删除 `data/`；已保存的 `elements.json` 会复用。若同名模型变量设置在 PowerShell 进程环境中，也要同步更新该值。
+
+已使用纯色图真实复现旧模型请求，返回 HTTP 400、`type=image_generation_user_error`、`code=invalid_value`、`param=model`、`The model 'gpt-image-1' does not exist.`。这解释了旧版显示 `code=unknown; type=unknown` 的原因：旧诊断白名单未覆盖这两个标签。新版保留这些安全标签与参数名，并对模型不可用、组织验证、内容审核分类提示；不输出原始错误正文。
+
+模型列表可能仍保留旧名称；能在 `/models` 中看到模型不等于编辑请求仍可用。不同账户的模型权限仍需实际请求验证。
