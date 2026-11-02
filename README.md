@@ -83,3 +83,25 @@ bash scripts/start.sh
 - 初始布局保持原有前景关系，极端长宽比可能显得拥挤或空旷；请分别调整两层。安全区按合并层非透明像素的外接矩形保守检测，将图案层全部视为关键内容。
 - 后端单进程、最多两个处理任务；服务重启后处理中任务显示中断，可用缓存继续。不支持多 Uvicorn worker、多人权限、自动清理、取消上游调用或生产部署。
 - 上传与结果存于本地 `data/`，不进 Git；按需备份或删除任务目录。默认仅绑定本机，不要直接作为公开服务部署。
+
+
+## HTTP 429 排查（有余额也可能发生）
+
+HTTP 429 不能直接等同于“账号余额不足”。新版读取 API 的 `error.code`、`error.type` 及有限的安全响应头，不展示原始错误正文、密钥或上传内容；失败任务会记录 `failed_stage`、`error_details`。程序不自动重复付费调用。
+
+| 诊断代码 | 含义与行动 |
+| --- | --- |
+| `insufficient_quota` / `billing_hard_limit_reached` / `billing_not_active` | 当前 API 密钥所属组织或项目的计费/配额限制。检查 API Platform 的组织、项目、Billing 与实际限制；ChatGPT Plus/Pro 订阅额度不能抵扣 API 调用。充值后的到账、失效赠金或项目选择也应核对，不能只看另一个项目的余额。 |
+| `rate_limit_exceeded` | 模型 RPM（每分钟请求）、TPM（每分钟 Token）、IPM（每分钟图片）等限制；有余额仍会触发。按 `Retry-After` 或重置时间等待、降低并发，检查 API Limits 中具体模型的限制。若单次输入已大于限制，等待无效，需要降低工作图尺寸或申请相应模型限额。 |
+| `unknown` | 上游未给出本工具识别的错误代码；仅凭 429 无法定性。保留 Request ID 并核对 API 控制台。 |
+
+在**与启动服务相同的 Python 环境**中运行：
+
+```powershell
+python scripts/check_api.py
+python scripts/check_api.py --probe
+```
+
+第一条只检查本地配置，第二条向当前视觉模型发送一次极小的真实文字请求（可能产生少量 API 费用），不上传图片、不调用图像编辑。输出仅含配置是否存在、模型、API 主机与脱敏诊断。小请求成功不表示大图片请求或图像模型一定未超限。
+
+`AD_OPENAI_API_KEY` 优先于 `OPENAI_API_KEY`；已有进程环境变量优先于 `.env`。请检查是否实际使用了预期项目的密钥，修改配置后重启 PowerShell 中的服务。成功步骤已缓存，重试使用“继续处理（复用缓存）”，不要为排查 429 点击“重新拆分”。

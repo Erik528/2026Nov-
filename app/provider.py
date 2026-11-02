@@ -3,14 +3,78 @@ import base64
 import io
 import json
 import os
+import re
 import urllib.parse
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 
 import httpx
 from PIL import Image, ImageOps
 
 
 class ProviderError(RuntimeError):
-    pass
+    def __init__(self, message, details=None):
+        super().__init__(message)
+        self.details = details or {}
+
+
+def response_error(response, route, model=None):
+    """Expose only allowlisted diagnostics, never the upstream message/body.
+
+    Provider messages may echo Authorization, uploaded content or customer data.
+    HTTP 429 alone cannot distinguish exhausted credit from throttling.
+    """
+    try:
+        payload = response.json()
+        error = payload.get('error', {}) if isinstance(payload, dict) else {}
+        if not isinstance(error, dict): error = {}
+    except ValueError:
+        error = {}
+    codes = {'insufficient_quota', 'rate_limit_exceeded', 'billing_hard_limit_reached',
+             'billing_not_active', 'usage_limit_reached', 'organization_quota_exceeded',
+             'invalid_api_key', 'model_not_found', 'permission_denied'}
+    types = {'insufficient_quota', 'rate_limit_error', 'invalid_request_error',
+             'billing_error', 'server_error', 'tokens', 'requests'}
+    code = error.get('code') if isinstance(error.get('code'), str) and error['code'] in codes else 'unknown'
+    kind = error.get('type') if isinstance(error.get('type'), str) and error['type'] in types else 'unknown'
+    details = {'http_status':response.status_code, 'code':code, 'type':kind,
+               'endpoint':route if route in ['/chat/completions','/images/edits'] else 'unknown'}
+    if isinstance(model, str) and re.fullmatch(r'gpt-[A-Za-z0-9_.:-]{1,60}', model):
+        details['model'] = model
+    request_id = response.headers.get('x-request-id', '')
+    if re.fullmatch(r'req_[a-fA-F0-9-]{8,80}', request_id): details['request_id'] = request_id
+    retry = response.headers.get('retry-after', '')
+    try:
+        seconds = float(retry) if re.fullmatch(r'\d+(?:\.\d+)?', retry) else (parsedate_to_datetime(retry)-datetime.now(timezone.utc)).total_seconds()
+        if 0 <= seconds <= 86400: details['retry_after_seconds'] = round(seconds, 1)
+    except (ValueError, TypeError, OverflowError):
+        pass
+    limits = {}
+    for suffix in ['limit-requests','limit-tokens','remaining-requests','remaining-tokens','reset-requests','reset-tokens']:
+        value = response.headers.get('x-ratelimit-'+suffix, '')
+        pattern = r'(?:\d+(?:\.\d+)?(?:ms|s|m|h))+' if suffix.startswith('reset') else r'\d{1,16}'
+        if len(value)<=60 and re.fullmatch(pattern,value): limits[suffix] = value
+    if limits: details['rate_limits'] = limits
+    if response.status_code == 429:
+        if code in {'insufficient_quota','billing_hard_limit_reached','billing_not_active','usage_limit_reached','organization_quota_exceeded'} or kind == 'insufficient_quota':
+            message = 'API 项目额度或计费限制：请核对当前密钥所属组织/项目的 API Billing、可用余额及消费上限。ChatGPT 订阅额度不等于 API 额度；等待重试通常不能解决。'
+            details['category'] = 'quota'
+        elif code == 'rate_limit_exceeded' or kind == 'rate_limit_error':
+            message = 'API 模型速率限制（RPM/TPM/IPM）：有余额也可能触发。请减少并发，并在 API Limits 中检查当前模型的请求、Token 或图片限制。'
+            if 'retry_after_seconds' in details:
+                message += f' 服务端建议至少等待 {details["retry_after_seconds"]} 秒；若单次输入已超过 Token 上限，等待本身无效。'
+            details['category'] = 'rate_limit'
+        else:
+            message = 'HTTP 429：上游未提供可识别的错误代码，暂不能区分额度不足和速率限制。请核对 API 项目 Billing 与模型 Limits。'
+            details['category'] = 'unknown_429'
+    else:
+        message = {401:'API 密钥无效或未授权。',403:'API 权限或网络策略拒绝，请检查模型权限和组织验证。',
+                   400:'API 模型或输入不受支持，请检查图像编辑权限与输入参数。'}.get(response.status_code,'API 上游服务错误。')
+    message += f' [HTTP {response.status_code}; code={code}; type={kind}]'
+    if details.get('model'): message += f' 模型：{details["model"]}。'
+    if details.get('request_id'): message += f' Request ID：{details["request_id"]}。'
+    if limits: message += ' 速率信息：'+', '.join(f'{k}={v}' for k,v in limits.items())+'。'
+    return ProviderError(message+' 已保留完成的中间结果；不会自动重复调用。',details)
 
 
 def settings():
@@ -38,10 +102,8 @@ class OpenAIImages:
                 res=client.post(self.cfg['base']+route,
                                headers={'Authorization':'Bearer '+self.cfg['key']},**kwargs)
                 if not res.is_success:
-                    # Never return provider request/response bodies, which can include secrets.
-                    msg={401:'密钥无效或未授权',403:'权限或网络策略拒绝',429:'额度或速率限制',
-                         400:'模型或输入不受支持，请检查模型与图像编辑权限'}.get(res.status_code,'上游服务错误')
-                    raise ProviderError(f'OpenAI API HTTP {res.status_code}：{msg}。已保留完成的中间结果。')
+                    model = (kwargs.get('json') or kwargs.get('data') or {}).get('model')
+                    raise response_error(res,route,model)
                 return res.json()
         except httpx.TimeoutException as e:
             raise ProviderError('API 请求超时；上游可能已计费。请检查结果后重试，不会自动重复付费调用。') from e

@@ -50,7 +50,7 @@ def run(job):
     try:
         api=OpenAIImages()
         source=Image.open(path/'work.png').convert('RGB')
-        update(path,stage='识别文字、Logo 与主体',progress=10,error=None,confirmed=False)
+        update(path,stage='识别文字、Logo 与主体',progress=10,error=None,error_details=None,failed_stage=None,confirmed=False)
         if not (path/'elements.json').exists():
             elements=api.detect(source)
             state=read(path)
@@ -74,7 +74,9 @@ def run(job):
         update(path,status='review',stage='待人工审核拆分质量',progress=100,
                assets=['text.png','graphics.png','clean.png','expanded.png','reconstructed.png','elements.json'],error=None)
     except (ProviderError,ValueError) as e:
-        update(path,status='error',stage='处理未完成',error=str(e))
+        failed_stage=read(path)['stage']
+        update(path,status='error',stage='处理未完成',failed_stage=failed_stage,
+               error=f'失败步骤：{failed_stage}。{e}',error_details=getattr(e,'details',{}))
     except Exception:
         update(path,status='error',stage='处理未完成',error='本地图像处理失败。已保留检查点，请检查文件、内存与服务端日志。')
         # Log traceback without provider bodies or credentials.
@@ -131,7 +133,7 @@ def process(job:str, fresh:bool=False):
             for item in path.glob('layout-*.json'): item.unlink()
             for pattern in ['preview-*.png','*.psd','validation-*.json']:
                 for item in path.glob(pattern): item.unlink()
-        update(path,status='processing',confirmed=False,stage='准备调用 API',progress=2,error=None,assets=[])
+        update(path,status='processing',confirmed=False,stage='准备调用 API',progress=2,error=None,error_details=None,failed_stage=None,assets=[])
         ACTIVE.add(job); POOL.submit(run,job)
     return read(path)
 
